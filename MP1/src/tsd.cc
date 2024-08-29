@@ -31,27 +31,32 @@
  *
  */
 
-#include <ctime>
-
-#include <google/protobuf/timestamp.pb.h>
+#include <glog/logging.h>
 #include <google/protobuf/duration.pb.h>
+#include <google/protobuf/timestamp.pb.h>
+#include <google/protobuf/util/time_util.h>
+#include <grpc++/grpc++.h>
+#include <stdlib.h>
+#include <unistd.h>
 
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
-#include <stdlib.h>
-#include <unistd.h>
-#include <google/protobuf/util/time_util.h>
-#include <grpc++/grpc++.h>
-#include<glog/logging.h>
-#define log(severity, msg) LOG(severity) << msg; google::FlushLogFiles(google::severity); 
+#define log(severity, msg) \
+  LOG(severity) << msg;    \
+  google::FlushLogFiles(google::severity);
 
 #include "sns.grpc.pb.h"
 
-
-using google::protobuf::Timestamp;
+using csce662::ListReply;
+using csce662::Message;
+using csce662::Reply;
+using csce662::Request;
+using csce662::SNSService;
 using google::protobuf::Duration;
+using google::protobuf::Timestamp;
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
@@ -59,12 +64,6 @@ using grpc::ServerReader;
 using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
-using csce662::Message;
-using csce662::ListReply;
-using csce662::Request;
-using csce662::Reply;
-using csce662::SNSService;
-
 
 struct Client {
   std::string username;
@@ -73,34 +72,31 @@ struct Client {
   std::vector<Client*> client_followers;
   std::vector<Client*> client_following;
   ServerReaderWriter<Message, Message>* stream = 0;
-  bool operator==(const Client& c1) const{
-    return (username == c1.username);
-  }
+  bool operator==(const Client& c1) const { return (username == c1.username); }
 };
 
-//Vector that stores every client that has been created
+// Vector that stores every client that has been created
 std::vector<Client*> client_db;
 
-
 class SNSServiceImpl final : public SNSService::Service {
-  
-  Status List(ServerContext* context, const Request* request, ListReply* list_reply) override {
+  Status List(ServerContext* context, const Request* request,
+              ListReply* list_reply) override {
     /*********
     YOUR CODE HERE
     **********/
     return Status::OK;
   }
 
-  Status Follow(ServerContext* context, const Request* request, Reply* reply) override {
-
+  Status Follow(ServerContext* context, const Request* request,
+                Reply* reply) override {
     /*********
     YOUR CODE HERE
     **********/
-    return Status::OK; 
+    return Status::OK;
   }
 
-  Status UnFollow(ServerContext* context, const Request* request, Reply* reply) override {
-
+  Status UnFollow(ServerContext* context, const Request* request,
+                  Reply* reply) override {
     /*********
     YOUR CODE HERE
     **********/
@@ -109,29 +105,27 @@ class SNSServiceImpl final : public SNSService::Service {
   }
 
   // RPC Login
-  Status Login(ServerContext* context, const Request* request, Reply* reply) override {
-
+  Status Login(ServerContext* context, const Request* request,
+               Reply* reply) override {
     /*********
     YOUR CODE HERE
     **********/
-    
+
     return Status::OK;
   }
 
-  Status Timeline(ServerContext* context, 
-		ServerReaderWriter<Message, Message>* stream) override {
-
+  Status Timeline(ServerContext* context,
+                  ServerReaderWriter<Message, Message>* stream) override {
     /*********
     YOUR CODE HERE
     **********/
-    
+
     return Status::OK;
   }
-
 };
 
 void RunServer(std::string port_no) {
-  std::string server_address = "0.0.0.0:"+port_no;
+  std::string server_address = "0.0.0.0:" + port_no;
   SNSServiceImpl service;
 
   ServerBuilder builder;
@@ -139,25 +133,25 @@ void RunServer(std::string port_no) {
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
   std::cout << "Server listening on " << server_address << std::endl;
-  log(INFO, "Server listening on "+server_address);
+  log(INFO, "Server listening on " + server_address);
 
   server->Wait();
 }
 
 int main(int argc, char** argv) {
-
   std::string port = "3010";
-  
+
   int opt = 0;
-  while ((opt = getopt(argc, argv, "p:")) != -1){
-    switch(opt) {
+  while ((opt = getopt(argc, argv, "p:")) != -1) {
+    switch (opt) {
       case 'p':
-          port = optarg;break;
+        port = optarg;
+        break;
       default:
-	  std::cerr << "Invalid Command Line Argument\n";
+        std::cerr << "Invalid Command Line Argument\n";
     }
   }
-  
+
   std::string log_file_name = std::string("server-") + port;
   google::InitGoogleLogging(log_file_name.c_str());
   log(INFO, "Logging Initialized. Server starting...");

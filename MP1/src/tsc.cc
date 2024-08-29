@@ -1,78 +1,71 @@
+#include <grpc++/grpc++.h>
+#include <unistd.h>
+
+#include <csignal>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
-#include <string>
-#include <unistd.h>
-#include <csignal>
-#include <grpc++/grpc++.h>
-#include "client.h"
 
+#include "client.h"
 #include "sns.grpc.pb.h"
+using csce662::ListReply;
+using csce662::Message;
+using csce662::Reply;
+using csce662::Request;
+using csce662::SNSService;
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::ClientReader;
 using grpc::ClientReaderWriter;
 using grpc::ClientWriter;
 using grpc::Status;
-using csce662::Message;
-using csce662::ListReply;
-using csce662::Request;
-using csce662::Reply;
-using csce662::SNSService;
 
-void sig_ignore(int sig) {
-  std::cout << "Signal caught " << sig;
-}
+void sig_ignore(int sig) { std::cout << "Signal caught " << sig; }
 
 Message MakeMessage(const std::string& username, const std::string& msg) {
-    Message m;
-    m.set_username(username);
-    m.set_msg(msg);
-    google::protobuf::Timestamp* timestamp = new google::protobuf::Timestamp();
-    timestamp->set_seconds(time(NULL));
-    timestamp->set_nanos(0);
-    m.set_allocated_timestamp(timestamp);
-    return m;
+  Message m;
+  m.set_username(username);
+  m.set_msg(msg);
+  google::protobuf::Timestamp* timestamp = new google::protobuf::Timestamp();
+  timestamp->set_seconds(time(NULL));
+  timestamp->set_nanos(0);
+  m.set_allocated_timestamp(timestamp);
+  return m;
 }
 
+class Client : public IClient {
+ public:
+  Client(const std::string& hname, const std::string& uname,
+         const std::string& p)
+      : hostname(hname), username(uname), port(p) {}
 
-class Client : public IClient
-{
-public:
-  Client(const std::string& hname,
-	 const std::string& uname,
-	 const std::string& p)
-    :hostname(hname), username(uname), port(p) {}
-
-  
-protected:
+ protected:
   virtual int connectTo();
   virtual IReply processCommand(std::string& input);
   virtual void processTimeline();
 
-private:
+ private:
   std::string hostname;
   std::string username;
   std::string port;
-  
+
   // You can have an instance of the client stub
   // as a member variable.
   std::unique_ptr<SNSService::Stub> stub_;
-  
+
   IReply Login();
   IReply List();
-  IReply Follow(const std::string &username);
-  IReply UnFollow(const std::string &username);
-  void   Timeline(const std::string &username);
+  IReply Follow(const std::string& username);
+  IReply UnFollow(const std::string& username);
+  void Timeline(const std::string& username);
 };
-
 
 ///////////////////////////////////////////////////////////
 //
 //////////////////////////////////////////////////////////
-int Client::connectTo()
-{
+int Client::connectTo() {
   // ------------------------------------------------------------
   // In this function, you are supposed to create a stub so that
   // you call service methods in the processCommand/porcessTimeline
@@ -80,20 +73,19 @@ int Client::connectTo()
   // to call any service methods in those functions.
   // Please refer to gRpc tutorial how to create a stub.
   // ------------------------------------------------------------
-    
-///////////////////////////////////////////////////////////
-// YOUR CODE HERE
-//////////////////////////////////////////////////////////
 
-    return 1;
+  ///////////////////////////////////////////////////////////
+  // YOUR CODE HERE
+  //////////////////////////////////////////////////////////
+
+  return 1;
 }
 
-IReply Client::processCommand(std::string& input)
-{
+IReply Client::processCommand(std::string& input) {
   // ------------------------------------------------------------
   // GUIDE 1:
   // In this function, you are supposed to parse the given input
-  // command and create your own message so that you call an 
+  // command and create your own message so that you call an
   // appropriate service method. The input command will be one
   // of the followings:
   //
@@ -102,7 +94,7 @@ IReply Client::processCommand(std::string& input)
   // LIST
   // TIMELINE
   // ------------------------------------------------------------
-  
+
   // ------------------------------------------------------------
   // GUIDE 2:
   // Then, you should create a variable of IReply structure
@@ -110,13 +102,12 @@ IReply Client::processCommand(std::string& input)
   // the result. Finally you can finish this function by returning
   // the IReply.
   // ------------------------------------------------------------
-  
-  
+
   // ------------------------------------------------------------
   // HINT: How to set the IReply?
   // Suppose you have "FOLLOW" service method for FOLLOW command,
   // IReply can be set as follow:
-  // 
+  //
   //     // some codes for creating/initializing parameters for
   //     // service method
   //     IReply ire;
@@ -127,133 +118,123 @@ IReply Client::processCommand(std::string& input)
   //     } else {
   //         ire.comm_status = FAILURE_NOT_EXISTS;
   //     }
-  //      
+  //
   //      return ire;
-  // 
-  // IMPORTANT: 
-  // For the command "LIST", you should set both "all_users" and 
+  //
+  // IMPORTANT:
+  // For the command "LIST", you should set both "all_users" and
   // "following_users" member variable of IReply.
   // ------------------------------------------------------------
 
-    IReply ire;
-    
-    /*********
-    YOUR CODE HERE
-    **********/
+  IReply ire;
 
-    return ire;
+  /*********
+  YOUR CODE HERE
+  **********/
+
+  return ire;
 }
 
-
-void Client::processTimeline()
-{
-    Timeline(username);
-}
+void Client::processTimeline() { Timeline(username); }
 
 // List Command
 IReply Client::List() {
+  IReply ire;
 
-    IReply ire;
+  /*********
+  YOUR CODE HERE
+  **********/
 
-    /*********
-    YOUR CODE HERE
-    **********/
-
-    return ire;
+  return ire;
 }
 
-// Follow Command        
+// Follow Command
 IReply Client::Follow(const std::string& username2) {
+  IReply ire;
 
-    IReply ire; 
-      
-    /***
-    YOUR CODE HERE
-    ***/
+  /***
+  YOUR CODE HERE
+  ***/
 
-    return ire;
+  return ire;
 }
 
-// UNFollow Command  
+// UNFollow Command
 IReply Client::UnFollow(const std::string& username2) {
+  IReply ire;
 
-    IReply ire;
+  /***
+  YOUR CODE HERE
+  ***/
 
-    /***
-    YOUR CODE HERE
-    ***/
-
-    return ire;
+  return ire;
 }
 
-// Login Command  
+// Login Command
 IReply Client::Login() {
+  IReply ire;
 
-    IReply ire;
-  
-    /***
-     YOUR CODE HERE
-    ***/
+  /***
+   YOUR CODE HERE
+  ***/
 
-    return ire;
+  return ire;
 }
 
 // Timeline Command
 void Client::Timeline(const std::string& username) {
+  // ------------------------------------------------------------
+  // In this function, you are supposed to get into timeline mode.
+  // You may need to call a service method to communicate with
+  // the server. Use getPostMessage/displayPostMessage functions
+  // in client.cc file for both getting and displaying messages
+  // in timeline mode.
+  // ------------------------------------------------------------
 
-    // ------------------------------------------------------------
-    // In this function, you are supposed to get into timeline mode.
-    // You may need to call a service method to communicate with
-    // the server. Use getPostMessage/displayPostMessage functions 
-    // in client.cc file for both getting and displaying messages 
-    // in timeline mode.
-    // ------------------------------------------------------------
+  // ------------------------------------------------------------
+  // IMPORTANT NOTICE:
+  //
+  // Once a user enter to timeline mode , there is no way
+  // to command mode. You don't have to worry about this situation,
+  // and you can terminate the client program by pressing
+  // CTRL-C (SIGINT)
+  // ------------------------------------------------------------
 
-    // ------------------------------------------------------------
-    // IMPORTANT NOTICE:
-    //
-    // Once a user enter to timeline mode , there is no way
-    // to command mode. You don't have to worry about this situation,
-    // and you can terminate the client program by pressing
-    // CTRL-C (SIGINT)
-    // ------------------------------------------------------------
-  
-    /***
-    YOUR CODE HERE
-    ***/
-
+  /***
+  YOUR CODE HERE
+  ***/
 }
-
-
 
 //////////////////////////////////////////////
 // Main Function
 /////////////////////////////////////////////
 int main(int argc, char** argv) {
-
   std::string hostname = "localhost";
   std::string username = "default";
   std::string port = "3010";
-    
+
   int opt = 0;
-  while ((opt = getopt(argc, argv, "h:u:p:")) != -1){
-    switch(opt) {
-    case 'h':
-      hostname = optarg;break;
-    case 'u':
-      username = optarg;break;
-    case 'p':
-      port = optarg;break;
-    default:
-      std::cout << "Invalid Command Line Argument\n";
+  while ((opt = getopt(argc, argv, "h:u:p:")) != -1) {
+    switch (opt) {
+      case 'h':
+        hostname = optarg;
+        break;
+      case 'u':
+        username = optarg;
+        break;
+      case 'p':
+        port = optarg;
+        break;
+      default:
+        std::cout << "Invalid Command Line Argument\n";
     }
   }
-      
+
   std::cout << "Logging Initialized. Client starting...";
-  
+
   Client myc(hostname, username, port);
-  
+
   myc.run();
-  
+
   return 0;
 }

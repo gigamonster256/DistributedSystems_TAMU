@@ -1,20 +1,20 @@
+#include <grpc++/grpc++.h>
+
+#include <ctime>
 #include <iostream>
 #include <string>
-#include <ctime>
 #include <vector>
-#include <grpc++/grpc++.h>
 
 #define MAX_DATA 256
 
-enum IStatus
-{
-    SUCCESS,
-    FAILURE_ALREADY_EXISTS,
-    FAILURE_NOT_EXISTS,
-    FAILURE_INVALID_USERNAME,
-    FAILURE_NOT_A_FOLLOWER,
-    FAILURE_INVALID,
-    FAILURE_UNKNOWN
+enum IStatus {
+  SUCCESS,
+  FAILURE_ALREADY_EXISTS,
+  FAILURE_NOT_EXISTS,
+  FAILURE_INVALID_USERNAME,
+  FAILURE_NOT_A_FOLLOWER,
+  FAILURE_INVALID,
+  FAILURE_UNKNOWN
 };
 
 /*
@@ -39,36 +39,32 @@ enum IStatus
  * This structure is not for communicating between server and client.
  * You need to design your own rules for the communication.
  */
-struct IReply
-{
-    grpc::Status grpc_status;
-    enum IStatus comm_status;
-    std::vector<std::string> all_users;
-    std::vector<std::string> followers;
+struct IReply {
+  grpc::Status grpc_status;
+  enum IStatus comm_status;
+  std::vector<std::string> all_users;
+  std::vector<std::string> followers;
 };
 
-
 std::string getPostMessage();
-void displayPostMessage(const std::string& sender, const std::string& message, std::time_t& time);
-  
-class IClient
-{
-public:
+void displayPostMessage(const std::string& sender, const std::string& message,
+                        std::time_t& time);
+
+class IClient {
+ public:
   void run();
-  
-protected:
+
+ protected:
   /*
    * Pure virtual functions to be implemented by students
    */
   virtual int connectTo() = 0;
   virtual IReply processCommand(std::string& cmd) = 0;
   virtual void processTimeline() = 0;
-  
-private:
+
+ private:
   void displayTitle() const;
   std::string getCommand() const;
   void displayCommandReply(const std::string& comm, const IReply& reply) const;
   void toUpperCase(std::string& str) const;
 };
-
-
