@@ -1,2 +1,8 @@
 # direnv
 .direnv/
+
+# c++ stuff
+*.o
+# protobuf
+*.pb.cc
+*.pb.h
