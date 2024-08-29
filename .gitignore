@@ -6,3 +6,6 @@
 # protobuf
 *.pb.cc
 *.pb.h
+
+# vscode
+.vscode/
