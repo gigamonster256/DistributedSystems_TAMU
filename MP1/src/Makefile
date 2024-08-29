@@ -22,11 +22,9 @@ PROTOBUF_ABSL_DEPS = absl_absl_check absl_absl_log absl_algorithm absl_base absl
 # tweak the list of libraries to link against to fix the build.
 PROTOBUF_UTF8_RANGE_LINK_LIBS = -lutf8_validity
 
-export PKG_CONFIG_PATH = /home/csce662/.local/lib/pkgconfig:/home/csce662/grpc/third_party/re2:/home/csce662/.local/share/pkgconfig/
-
 HOST_SYSTEM = $(shell uname | cut -f 1 -d_)
 SYSTEM ?= $(HOST_SYSTEM)
-CXX = g++
+CXX ?= g++
 CPPFLAGS += `pkg-config --cflags protobuf grpc absl_flags absl_flags_parse`
 CXXFLAGS += -std=c++17
 
@@ -35,7 +33,7 @@ LDFLAGS += -L/usr/local/lib `pkg-config --libs --static protobuf grpc++ absl_fla
            $(PROTOBUF_UTF8_RANGE_LINK_LIBS) \
            -pthread\
            -lgrpc++_reflection\
-           -ldl
+           -ldl -lglog
 else
 LDFLAGS += -L/usr/local/lib `pkg-config --libs --static protobuf grpc++ absl_flags absl_flags_parse $(PROTOBUF_ABSL_DEPS)`\
            $(PROTOBUF_UTF8_RANGE_LINK_LIBS) \
