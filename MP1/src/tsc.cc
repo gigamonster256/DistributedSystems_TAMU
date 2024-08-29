@@ -22,7 +22,7 @@ using csce662::Reply;
 using csce662::SNSService;
 
 void sig_ignore(int sig) {
-  std::cout << "Signal caught " + sig;
+  std::cout << "Signal caught " << sig;
 }
 
 Message MakeMessage(const std::string& username, const std::string& msg) {
