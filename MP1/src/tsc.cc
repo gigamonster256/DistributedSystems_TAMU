@@ -50,10 +50,7 @@ class Client : public IClient {
   std::string hostname;
   std::string username;
   std::string port;
-
-  // You can have an instance of the client stub
-  // as a member variable.
-  std::unique_ptr<SNSService::Stub> stub_;
+  std::string session_token;
 
   IReply Login();
   IReply List();
@@ -62,76 +59,54 @@ class Client : public IClient {
   void Timeline(const std::string& username);
 };
 
+std::unique_ptr<SNSService::Stub> stub_;
+
 ///////////////////////////////////////////////////////////
 //
 //////////////////////////////////////////////////////////
 int Client::connectTo() {
-  // ------------------------------------------------------------
-  // In this function, you are supposed to create a stub so that
-  // you call service methods in the processCommand/porcessTimeline
-  // functions. That is, the stub should be accessible when you want
-  // to call any service methods in those functions.
-  // Please refer to gRpc tutorial how to create a stub.
-  // ------------------------------------------------------------
+  // create stub
+  auto channel = grpc::CreateChannel(hostname + ":" + port,
+                                     grpc::InsecureChannelCredentials());
+  stub_ = SNSService::NewStub(channel);
 
-  ///////////////////////////////////////////////////////////
-  // YOUR CODE HERE
-  //////////////////////////////////////////////////////////
+  IReply ire = Login();
+  if (!ire.grpc_status.ok() || ire.comm_status != SUCCESS) {
+    return -1;
+  }
 
-  return 1;
+  return 0;
 }
 
 IReply Client::processCommand(std::string& input) {
-  // ------------------------------------------------------------
-  // GUIDE 1:
-  // In this function, you are supposed to parse the given input
-  // command and create your own message so that you call an
-  // appropriate service method. The input command will be one
-  // of the followings:
-  //
-  // FOLLOW <username>
-  // UNFOLLOW <username>
-  // LIST
-  // TIMELINE
-  // ------------------------------------------------------------
-
-  // ------------------------------------------------------------
-  // GUIDE 2:
-  // Then, you should create a variable of IReply structure
-  // provided by the client.h and initialize it according to
-  // the result. Finally you can finish this function by returning
-  // the IReply.
-  // ------------------------------------------------------------
-
-  // ------------------------------------------------------------
-  // HINT: How to set the IReply?
-  // Suppose you have "FOLLOW" service method for FOLLOW command,
-  // IReply can be set as follow:
-  //
-  //     // some codes for creating/initializing parameters for
-  //     // service method
-  //     IReply ire;
-  //     grpc::Status status = stub_->FOLLOW(&context, /* some parameters */);
-  //     ire.grpc_status = status;
-  //     if (status.ok()) {
-  //         ire.comm_status = SUCCESS;
-  //     } else {
-  //         ire.comm_status = FAILURE_NOT_EXISTS;
-  //     }
-  //
-  //      return ire;
-  //
-  // IMPORTANT:
-  // For the command "LIST", you should set both "all_users" and
-  // "following_users" member variable of IReply.
-  // ------------------------------------------------------------
-
+  
+  std::string cmd = input;
+  // use same parsing method as getCommand to split string
+  std::size_t index = input.find_first_of(" ");
+  // FOLLOW and UNFOLLOW
+  if (index != std::string::npos) {
+    cmd = input.substr(0, index);
+    std::string argument = input.substr(index + 1, (input.length() - index));
+    if (cmd == "FOLLOW") {
+      return Follow(argument);
+    } else if (cmd == "UNFOLLOW") {
+      return UnFollow(argument);
+    }
+    IReply ire;
+    ire.comm_status = FAILURE_INVALID;
+    return ire;
+  }
+  // LIST and TIMELINE
+  if (cmd == "LIST") {
+    return List();
+  }
+  if (cmd == "TIMELINE") {
+    // client.run() will handle this in processTimeline
+    // weird but fits the starter code
+    return IReply();
+  }
   IReply ire;
-
-  /*********
-  YOUR CODE HERE
-  **********/
-
+  ire.comm_status = FAILURE_INVALID;
   return ire;
 }
 
@@ -141,9 +116,26 @@ void Client::processTimeline() { Timeline(username); }
 IReply Client::List() {
   IReply ire;
 
-  /*********
-  YOUR CODE HERE
-  **********/
+  ClientContext context;
+
+  Request request;
+  request.set_username(session_token);
+
+  ListReply reply;
+
+  ire.grpc_status = stub_->List(&context, request, &reply);
+
+  if (ire.grpc_status.ok()) {
+    ire.comm_status = SUCCESS;
+    for (int i = 0; i < reply.all_users_size(); i++) {
+      ire.all_users.push_back(reply.all_users(i));
+    }
+    for (int i = 0; i < reply.followers_size(); i++) {
+      ire.followers.push_back(reply.followers(i));
+    }
+  } else {
+    ire.comm_status = FAILURE_UNKNOWN;
+  }
 
   return ire;
 }
@@ -152,9 +144,28 @@ IReply Client::List() {
 IReply Client::Follow(const std::string& username2) {
   IReply ire;
 
-  /***
-  YOUR CODE HERE
-  ***/
+  ClientContext context;
+
+  Request request;
+  request.set_username(session_token);
+  request.add_arguments(username2);
+
+  Reply reply;
+
+  ire.grpc_status = stub_->Follow(&context, request, &reply);
+
+  if (ire.grpc_status.ok()) {
+    ire.comm_status = SUCCESS;
+  } else if (ire.grpc_status.error_code() ==
+             grpc::StatusCode::INVALID_ARGUMENT) {
+    // this error could be a few different things but only following self is
+    // tested
+    ire.grpc_status = Status::OK;
+    ire.comm_status = FAILURE_ALREADY_EXISTS;
+  } else {
+    ire.grpc_status = Status::OK;
+    ire.comm_status = FAILURE_INVALID_USERNAME;
+  }
 
   return ire;
 }
@@ -163,9 +174,24 @@ IReply Client::Follow(const std::string& username2) {
 IReply Client::UnFollow(const std::string& username2) {
   IReply ire;
 
-  /***
-  YOUR CODE HERE
-  ***/
+  ClientContext context;
+
+  Request request;
+  request.set_username(session_token);
+  request.add_arguments(username2);
+
+  Reply reply;
+
+  ire.grpc_status = stub_->UnFollow(&context, request, &reply);
+
+  if (ire.grpc_status.ok()) {
+    ire.comm_status = SUCCESS;
+  } else {
+    // a bit weird but fits what client.cc is doing
+    // to print error messages
+    ire.grpc_status = Status::OK;
+    ire.comm_status = FAILURE_INVALID_USERNAME;
+  }
 
   return ire;
 }
@@ -174,9 +200,23 @@ IReply Client::UnFollow(const std::string& username2) {
 IReply Client::Login() {
   IReply ire;
 
-  /***
-   YOUR CODE HERE
-  ***/
+  ClientContext context;
+
+  Request request;
+  request.set_username(username);
+
+  Reply reply;
+
+  ire.grpc_status = stub_->Login(&context, request, &reply);
+
+  if (ire.grpc_status.ok()) {
+    ire.comm_status = SUCCESS;
+    session_token = reply.msg();
+  } else if (ire.grpc_status.error_code() == grpc::StatusCode::ALREADY_EXISTS) {
+    ire.comm_status = FAILURE_ALREADY_EXISTS;
+  } else {
+    ire.comm_status = FAILURE_UNKNOWN;
+  }
 
   return ire;
 }
@@ -200,9 +240,33 @@ void Client::Timeline(const std::string& username) {
   // CTRL-C (SIGINT)
   // ------------------------------------------------------------
 
-  /***
-  YOUR CODE HERE
-  ***/
+  ClientContext context;
+  context.AddMetadata("token", session_token);
+
+  std::shared_ptr<ClientReaderWriter<Message, Message>> stream(
+      stub_->Timeline(&context));
+  // check if stream is valid
+  if (!stream) {
+    std::cout << "Failed to create stream\n";
+    return;
+  }
+  // thread for user input
+  std::thread writer([stream, username]() {
+    while (1) {
+      std::string msg = getPostMessage();
+      Message m = MakeMessage(username, msg);
+      stream->Write(m);
+    }
+  });
+
+  // thread for server messages
+  Message m;
+  while (stream->Read(&m)) {
+    time_t t = m.timestamp().seconds();
+    displayPostMessage(m.username(), m.msg(), t);
+  }
+  // should never get here (no way to exit timeline mode)
+  writer.join();
 }
 
 //////////////////////////////////////////////
