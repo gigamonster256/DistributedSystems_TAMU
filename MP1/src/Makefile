@@ -26,7 +26,7 @@ HOST_SYSTEM = $(shell uname | cut -f 1 -d_)
 SYSTEM ?= $(HOST_SYSTEM)
 CXX ?= g++
 CPPFLAGS += `pkg-config --cflags protobuf grpc absl_flags absl_flags_parse`
-CXXFLAGS += -std=c++17
+CXXFLAGS += -std=c++17 -Wall -Wextra -Werror
 
 ifeq ($(SYSTEM),Darwin)
 LDFLAGS += -L/usr/local/lib `pkg-config --libs --static protobuf grpc++ absl_flags absl_flags_parse $(PROTOBUF_ABSL_DEPS)`\
@@ -67,9 +67,11 @@ tsd: sns.pb.o sns.grpc.pb.o tsd.o
 %.pb.cc: %.proto
 	$(PROTOC) -I $(PROTOS_PATH) --cpp_out=. $<
 
-clean:
+clean: clean_db
 	rm -f *~ *.o *.pb.cc *.pb.h tsc tsd
 
+clean_db:
+	rm -f users.txt *.following *.timeline
 
 # The following is to test your system and ensure a smoother experience.
 # They are by no means necessary to actually compile a grpc-enabled software.
