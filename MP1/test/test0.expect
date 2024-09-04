@@ -1,0 +1,22 @@
+#!/usr/bin/env expect
+
+proc abort { } { send_user "Timeout!" ; exit 2 }
+set timeout 5
+expect_before timeout abort
+
+set prompt "Cmd> "
+set user "u1"
+
+spawn ./server.sh
+expect "Server listening on"
+
+spawn ./client.sh $user
+expect $prompt
+
+# a user with the same name should not get a prompt before dying
+spawn ./client.sh $user
+expect {
+    $prompt { exit 1 }
+    eof {exit 0}
+}
+

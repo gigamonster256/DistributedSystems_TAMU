@@ -1,0 +1,76 @@
+#!/usr/bin/env expect
+
+proc abort { } { send_user "Timeout!" ; exit 2 }
+set timeout 5
+expect_before timeout abort
+
+spawn ./server.sh
+expect "Server listening on"
+
+# client 4 is for external synchronization
+set i 1
+while {$i < 5} {
+    spawn ./client.sh u$i
+    set u$i $spawn_id
+    expect "Cmd> "
+    incr i
+}
+
+send -i $u1 "follow u2\r"
+expect -i $u1 "Command completed successfully"
+
+send -i $u2 "follow u1\r"
+expect -i $u2 "Command completed successfully"
+
+send -i $u1 "timeline\r"
+expect -i $u1 "Command completed successfully"
+expect -i $u1 "Now you are in the timeline"
+
+## syncronization helper setup
+send -i $u4 "follow u1\r"
+expect -i $u4 "Command completed successfully"
+send -i $u4 "timeline\r"
+expect -i $u4 "Command completed successfully"
+expect -i $u4 "Now you are in the timeline"
+
+set i 1
+while {$i < 11} {
+    send -i $u1 "p$i\r"
+    incr i
+}
+
+# let u1 calls happen
+expect -i $u4 "p10"
+
+send -i $u3 "follow u1\r"
+expect -i $u3 "Command completed successfully"
+
+while {$i < 23} {
+    send -i $u1 "p$i\r"
+    incr i
+}
+
+# let u1 calls happen
+expect -i $u4 "p22"
+
+send -i $u2 "timeline\r"
+expect -i $u2 "Command completed successfully"
+expect -i $u2 "Now you are in the timeline"
+
+# reverse order only last 20
+set i 22
+while {$i > 2} {
+    expect -i $u2 "p$i"
+    incr i -1
+}
+
+send -i $u3 "timeline\r"
+expect -i $u3 "Command completed successfully"
+expect -i $u3 "Now you are in the timeline"
+
+# reverse order only when following
+set i 22
+while {$i > 10} {
+    expect -i $u3 "p$i"
+    incr i -1
+}
