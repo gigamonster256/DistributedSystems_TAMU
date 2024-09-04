@@ -1,0 +1,8 @@
+# executables
+tsc
+tsd
+
+# "database" files
+users.txt
+*.following
+*.timeline
