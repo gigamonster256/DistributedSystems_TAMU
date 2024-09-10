@@ -455,13 +455,21 @@ class SNSServiceImpl final : public SNSService::Service {
           log(ERROR, "Timeline: Follower " + follower + " not found");
           continue;
         }
-        // save to followers files
+        // save to followers files and self file
         {
           std::lock_guard<std::mutex> lock(user_db[follower]->mtx);
-          std::ofstream file(follower + ".timeline", std::ios::app);
+          std::ofstream file(follower + TIMELINEFILEEXTENSION, std::ios::app);
           if (file.is_open()) {
             file << message << std::endl;
             file.close();
+          }
+
+          std::lock_guard<std::mutex> lock(user->mtx);
+          std::ofstream file2(user->username + TIMELINEFILEEXTENSION,
+                              std::ios::app);
+          if (file2.is_open()) {
+            file2 << message << std::endl;
+            file2.close();
           }
         }
         // send to followers if they are online
