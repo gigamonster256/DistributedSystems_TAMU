@@ -5,6 +5,7 @@ set timeout 5
 expect_before timeout abort
 
 spawn ./server.sh
+set server $spawn_id
 expect "Server listening on"
 
 set i 1
@@ -93,6 +94,10 @@ expect -i $u9 "Now you are in the timeline"
 send -i $u10 "timeline\r"
 expect -i $u10 "Now you are in the timeline"
 
+# no way to make sure all clients are actually in the timeline
+# (Now you are in the timeline is printed before RPC actually starts)
+sleep 1
+
 # send messages (enforcing ordering by also testing recieved messages)
 send -i $u1 "p1\r"
 expect -i $u2 "p1"
@@ -144,3 +149,7 @@ expect -i $u6 "p12"
 expect -i $u7 "p12"
 expect -i $u8 "p12"
 expect -i $u9 "p12"
+
+# kill server (clients dying first seems to send rogue messages to server
+# which pollutes the timeline files)
+send -i $server "\x03"

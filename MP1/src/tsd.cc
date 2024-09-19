@@ -397,8 +397,6 @@ class SNSServiceImpl final : public SNSService::Service {
       return Status(grpc::StatusCode::FAILED_PRECONDITION, "Username missing");
     }
 
-    log(INFO, "Timeline request from " + token);
-
     // save the stream so that who we are following can send us messages
     User* user = user_sessions[token];
 
@@ -407,6 +405,8 @@ class SNSServiceImpl final : public SNSService::Service {
       stream->WriteLast(Message(), grpc::WriteOptions());
       return Status(grpc::StatusCode::FAILED_PRECONDITION, "Invalid user");
     }
+
+    log(INFO, "Timeline request from " + user->username);
 
     user->stream = stream;
 
@@ -450,6 +450,17 @@ class SNSServiceImpl final : public SNSService::Service {
         return Status(grpc::StatusCode::PERMISSION_DENIED,
                       "Cannot send message as another user");
       }
+      log(INFO, "Message from " + username + " to followers");
+      // save to self file
+      {
+        std::lock_guard<std::mutex> lock(user->mtx);
+        std::ofstream file(user->username + TIMELINEFILEEXTENSION,
+                           std::ios::app);
+        if (file.is_open()) {
+          file << message << std::endl;
+          file.close();
+        }
+      }
       for (auto& follower : user->followers) {
         if (user_db[follower] == nullptr) {
           log(ERROR, "Timeline: Follower " + follower + " not found");
@@ -462,14 +473,6 @@ class SNSServiceImpl final : public SNSService::Service {
           if (file.is_open()) {
             file << message << std::endl;
             file.close();
-          }
-
-          std::lock_guard<std::mutex> lock(user->mtx);
-          std::ofstream file2(user->username + TIMELINEFILEEXTENSION,
-                              std::ios::app);
-          if (file2.is_open()) {
-            file2 << message << std::endl;
-            file2.close();
           }
         }
         // send to followers if they are online

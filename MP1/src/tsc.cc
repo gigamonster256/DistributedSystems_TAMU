@@ -252,11 +252,9 @@ void Client::Timeline(const std::string& username) {
   }
   // thread for user input
   std::thread writer([stream, username]() {
-    while (1) {
-      std::string msg = getPostMessage();
-      Message m = MakeMessage(username, msg);
-      stream->Write(m);
-    }
+    // while stream is open
+    while (stream->Write(MakeMessage(username, getPostMessage()))) {
+    };
   });
 
   // thread for server messages
