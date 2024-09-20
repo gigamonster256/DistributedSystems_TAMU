@@ -22,6 +22,11 @@ PROTOBUF_ABSL_DEPS = absl_absl_check absl_absl_log absl_algorithm absl_base absl
 # tweak the list of libraries to link against to fix the build.
 PROTOBUF_UTF8_RANGE_LINK_LIBS = -lutf8_validity
 
+# export PKG_CONFIG_PATH only if it's not already set
+ifeq ($(origin PKG_CONFIG_PATH), undefined)
+	export PKG_CONFIG_PATH = /home/csce662/.local/lib/pkgconfig:/home/csce662/grpc/third_party/re2:/home/csce662/.local/share/pkgconfig/
+endif
+
 HOST_SYSTEM = $(shell uname | cut -f 1 -d_)
 SYSTEM ?= $(HOST_SYSTEM)
 CXX ?= g++
