@@ -3,12 +3,14 @@
 
 PROTOBUF_UTF8_RANGE_LINK_LIBS = -lutf8_validity
 
-export PKG_CONFIG_PATH = /home/csce662/.local/lib/pkgconfig:/home/csce662/grpc/third_party/re2:/home/csce662/.local/share/pkgconfig/
+ifeq ($(origin PKG_CONFIG_PATH), undefined)
+	export PKG_CONFIG_PATH = /home/csce662/.local/lib/pkgconfig:/home/csce662/grpc/third_party/re2:/home/csce662/.local/share/pkgconfig/
+endif
 
 
 HOST_SYSTEM = $(shell uname | cut -f 1 -d_)
 SYSTEM ?= $(HOST_SYSTEM)
-CXX = g++
+CXX ?= g++
 CPPFLAGS += `pkg-config --cflags protobuf grpc `
 CXXFLAGS += -std=c++17 -g
 
@@ -17,7 +19,7 @@ LDFLAGS += -L/usr/local/lib `pkg-config --libs --static protobuf grpc++  `\
            $(PROTOBUF_UTF8_RANGE_LINK_LIBS) \
            -pthread\
            -lgrpc++_reflection\
-           -ldl
+           -ldl -lglog
 else
 LDFLAGS += -L/usr/local/lib `pkg-config --libs --static protobuf grpc++  `\
            $(PROTOBUF_UTF8_RANGE_LINK_LIBS) \
