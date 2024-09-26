@@ -79,8 +79,7 @@ int Client::connectTo() {
 }
 
 IReply Client::processCommand(std::string& input) {
-  
-  std::string cmd = input;
+    std::string cmd = input;
   // use same parsing method as getCommand to split string
   std::size_t index = input.find_first_of(" ");
   // FOLLOW and UNFOLLOW
