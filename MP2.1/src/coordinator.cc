@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -24,93 +25,47 @@
 #include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
 
-using csce662::Confirmation;
-using csce662::CoordService;
-using csce662::ID;
-using csce662::ServerInfo;
-using csce662::ServerList;
-using csce662::SynchService;
-using google::protobuf::Duration;
+using namespace csce662;
+
+using google::protobuf::Empty;
 using google::protobuf::Timestamp;
-using grpc::Server;
+
 using grpc::ServerBuilder;
 using grpc::ServerContext;
-using grpc::ServerReader;
-using grpc::ServerReaderWriter;
-using grpc::ServerWriter;
 using grpc::Status;
 
-struct zNode {
-  int serverID;
-  std::string hostname;
-  std::string port;
-  std::string type;
-  std::time_t last_heartbeat;
-  bool missed_heartbeat;
-  bool isActive();
-};
+std::map<uint32_t, time_t> server_status;
 
-// potentially thread safe
-std::mutex v_mutex;
-std::vector<zNode*> cluster1;
-std::vector<zNode*> cluster2;
-std::vector<zNode*> cluster3;
-
-// creating a vector of vectors containing znodes
-std::vector<std::vector<zNode*>> clusters = {cluster1, cluster2, cluster3};
-
-// func declarations
-int findServer(std::vector<zNode*> v, int id);
-std::time_t getTimeNow();
-void checkHeartbeat();
-
-bool zNode::isActive() {
-  bool status = false;
-  if (!missed_heartbeat) {
-    status = true;
-  } else if (difftime(getTimeNow(), last_heartbeat) < 10) {
-    status = true;
-  }
-  return status;
+const std::time_t now() {
+  return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 }
 
 class CoordServiceImpl final : public CoordService::Service {
-  Status Heartbeat(ServerContext* context, const ServerInfo* serverinfo,
-                   Confirmation* confirmation) override {
-    // Your code here
+  Status Register(ServerContext* context, const ServerRegistration* request,
+                  Empty* response) override {
     return Status::OK;
   }
 
-  // function returns the server information for requested client id
-  // this function assumes there are always 3 clusters and has math
-  // hardcoded to represent this.
-  Status GetServer(ServerContext* context, const ID* id,
-                   ServerInfo* serverinfo) override {
-    // Your code here
+  Status Heartbeat(ServerContext* context, const ServerID* serverid,
+                   Empty*) override {
+    server_status[serverid->id()] = now();
+    return Status::OK;
+  }
+
+  Status GetServer(ServerContext* context, const ClientID* clientid,
+                   ServerInfo* response) override {
     return Status::OK;
   }
 };
 
 void RunServer(std::string port_no) {
-  // start thread to check heartbeats
-  std::thread hb(checkHeartbeat);
-  // localhost = 127.0.0.1
   std::string server_address("127.0.0.1:" + port_no);
   CoordServiceImpl service;
-  // grpc::EnableDefaultHealthCheckService(true);
-  // grpc::reflection::InitProtoReflectionServerBuilderPlugin();
   ServerBuilder builder;
-  // Listen on the given address without any authentication mechanism.
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
-  // Register "service" as the instance through which we'll communicate with
-  // clients. In this case it corresponds to an *synchronous* service.
   builder.RegisterService(&service);
-  // Finally assemble the server.
-  std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "Server listening on " << server_address << std::endl;
-
-  // Wait for the server to shutdown. Note that some other thread must be
-  // responsible for shutting down the server for this call to ever return.
+  auto server(builder.BuildAndStart());
+  std::cout << "Coordinator listening on " << server_address << std::endl;
   server->Wait();
 }
 
@@ -128,36 +83,4 @@ int main(int argc, char** argv) {
   }
   RunServer(port);
   return 0;
-}
-
-void checkHeartbeat() {
-  while (true) {
-    // check servers for heartbeat > 10
-    // if true turn missed heartbeat = true
-    //  Your code below
-
-    v_mutex.lock();
-
-    // iterating through the clusters vector of vectors of znodes
-    for (auto& c : clusters) {
-      for (auto& s : c) {
-        if (difftime(getTimeNow(), s->last_heartbeat) > 10) {
-          std::cout << "missed heartbeat from server " << s->serverID
-                    << std::endl;
-          if (!s->missed_heartbeat) {
-            s->missed_heartbeat = true;
-            s->last_heartbeat = getTimeNow();
-          }
-        }
-      }
-    }
-
-    v_mutex.unlock();
-
-    sleep(3);
-  }
-}
-
-std::time_t getTimeNow() {
-  return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 }
