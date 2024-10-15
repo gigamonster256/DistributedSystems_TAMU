@@ -1,36 +1,3 @@
-/*
- *
- * Copyright 2015, Google Inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
- *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- */
-
 #include <glog/logging.h>
 #include <google/protobuf/duration.pb.h>
 #include <google/protobuf/timestamp.pb.h>
@@ -64,12 +31,14 @@
 #define FOLLOWINGFILEEXTENSION (".following")
 #define TIMELINEFILEEXTENSION (".timeline")
 
+using csce662::ClientID;
+using csce662::FollowRequest;
 using csce662::ListReply;
+using csce662::LoginRequest;
 using csce662::Message;
-using csce662::Reply;
-using csce662::Request;
 using csce662::SNSService;
 using google::protobuf::Duration;
+using google::protobuf::Empty;
 using google::protobuf::Timestamp;
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -92,10 +61,8 @@ struct User {
   User(std::string name) : username(name) {}
 };
 
-typedef std::string session_token;
-
 std::unordered_map<std::string, User*> user_db;
-std::unordered_map<session_token, User*> user_sessions;
+std::unordered_map<uint32_t, User*> user_sessions;
 std::mutex db_mtx;
 std::mutex session_mtx;
 
@@ -131,25 +98,23 @@ void load_user_db() {
   }
 }
 
-session_token generate_session(User* user) {
-  session_token token;
+uint32_t generate_session(User* user) {
   int iterations = 0;
   std::lock_guard<std::mutex> lock(session_mtx);
   while (iterations < 100) {
-    token = std::to_string(rand());
+    uint32_t token = rand();
     if (user_sessions.find(token) == user_sessions.end()) {
       user_sessions[token] = user;
       return token;
     }
   }
-  return "";
+  return 0;
 }
 
 class SNSServiceImpl final : public SNSService::Service {
-  Status List(ServerContext*, const Request* request,
+  Status List(ServerContext*, const ClientID* client_id,
               ListReply* list_reply) override {
-    const std::string& token = request->username();
-    User* user = user_sessions[token];
+    User* user = user_sessions[client_id->id()];
     if (user == nullptr) {
       log(ERROR, "List: Bad token");
       return Status(grpc::StatusCode::UNAUTHENTICATED, "Invalid user");
@@ -165,25 +130,15 @@ class SNSServiceImpl final : public SNSService::Service {
     return Status::OK;
   }
 
-  Status Follow(ServerContext*, const Request* request, Reply*) override {
-    const std::string& token = request->username();
-    User* following_user = user_sessions[token];
+  Status Follow(ServerContext*, const FollowRequest* request, Empty*) override {
+    User* following_user = user_sessions[request->id()];
     if (following_user == nullptr) {
       log(ERROR, "Follow: Bad token");
       return Status(grpc::StatusCode::UNAUTHENTICATED, "Invalid user");
     }
     log(INFO, "Follow request from " + following_user->username);
 
-    // get the user that this user wants to follow
-    if (request->arguments_size() == 0) {
-      log(ERROR, "Follow: Too few arguments");
-      return Status(grpc::StatusCode::INVALID_ARGUMENT, "Too few arguments");
-    }
-    if (request->arguments_size() > 1) {
-      log(ERROR, "Follow: Too many arguments");
-      return Status(grpc::StatusCode::INVALID_ARGUMENT, "Too many arguments");
-    }
-    const std::string& being_followed_username = request->arguments(0);
+    const std::string& being_followed_username = request->follower();
 
     // make sure not following self
     if (following_user->username == being_followed_username) {
@@ -228,9 +183,9 @@ class SNSServiceImpl final : public SNSService::Service {
     return Status::OK;
   }
 
-  Status UnFollow(ServerContext*, const Request* request, Reply*) override {
-    const std::string& token = request->username();
-    User* unfollowing_user = user_sessions[token];
+  Status UnFollow(ServerContext*, const FollowRequest* request,
+                  Empty*) override {
+    User* unfollowing_user = user_sessions[request->id()];
     if (unfollowing_user == nullptr) {
       log(ERROR, "UnFollow: Bad token");
       return Status(grpc::StatusCode::UNAUTHENTICATED, "Invalid user");
@@ -238,15 +193,7 @@ class SNSServiceImpl final : public SNSService::Service {
     log(INFO, "Unfollow request from " + unfollowing_user->username);
 
     // get the user that this user wants to unfollow
-    if (request->arguments_size() == 0) {
-      log(ERROR, "UnFollow: Too few arguments");
-      return Status(grpc::StatusCode::INVALID_ARGUMENT, "Too few arguments");
-    }
-    if (request->arguments_size() > 1) {
-      log(ERROR, "UnFollow: Too many arguments");
-      return Status(grpc::StatusCode::INVALID_ARGUMENT, "Too many arguments");
-    }
-    std::string being_unfollowed_username = request->arguments(0);
+    std::string being_unfollowed_username = request->follower();
 
     // make sure not unfollowing self
     if (unfollowing_user->username == being_unfollowed_username) {
@@ -341,7 +288,7 @@ class SNSServiceImpl final : public SNSService::Service {
     return Status::OK;
   }
 
-  Status Login(ServerContext*, const Request* request, Reply* reply) override {
+  Status Login(ServerContext*, const LoginRequest* request, ClientID* client_id) override {
     const std::string& username = request->username();
     log(INFO, "Login request from " + username);
 
@@ -371,13 +318,13 @@ class SNSServiceImpl final : public SNSService::Service {
     log(INFO, "User " + username + " connected");
 
     // generate a session token
-    session_token token = generate_session(user);
-    if (token.empty()) {
+    uint32_t token = generate_session(user);
+    if (token == 0) {
       log(ERROR, "Login: Failed to generate session token");
       return Status(grpc::StatusCode::INTERNAL,
                     "Failed to generate session token");
     }
-    reply->set_msg(token);
+    client_id->set_id(token);
 
     return Status::OK;
   }
@@ -386,17 +333,17 @@ class SNSServiceImpl final : public SNSService::Service {
                   ServerReaderWriter<Message, Message>* stream) override {
     // get session token from client metadata
     const auto& metadata = context->client_metadata();
-    std::string token;
+    uint32_t token = 0;
     for (auto it = metadata.begin(); it != metadata.end(); it++) {
       if (it->first == "token") {
-        token = std::string(it->second.data(), it->second.size());
+        token = std::stoi(it->second.data());
         break;
       }
     }
-    if (token.empty()) {
-      log(ERROR, "Timeline: Username not found");
+    if (token == 0) {
+      log(ERROR, "Timeline: Token not found");
       stream->WriteLast(Message(), grpc::WriteOptions());
-      return Status(grpc::StatusCode::FAILED_PRECONDITION, "Username missing");
+      return Status(grpc::StatusCode::FAILED_PRECONDITION, "Token missing");
     }
 
     // save the stream so that who we are following can send us messages

@@ -10,19 +10,19 @@
 
 #include "client.h"
 #include "sns.grpc.pb.h"
+using csce662::ClientID;
+using csce662::FollowRequest;
 using csce662::ListReply;
+using csce662::LoginRequest;
 using csce662::Message;
-using csce662::Reply;
-using csce662::Request;
 using csce662::SNSService;
+using google::protobuf::Empty;
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::ClientReader;
 using grpc::ClientReaderWriter;
 using grpc::ClientWriter;
 using grpc::Status;
-
-void sig_ignore(int sig) { std::cout << "Signal caught " << sig; }
 
 Message MakeMessage(const std::string& username, const std::string& msg) {
   Message m;
@@ -37,9 +37,9 @@ Message MakeMessage(const std::string& username, const std::string& msg) {
 
 class Client : public IClient {
  public:
-  Client(const std::string& hname, const std::string& uname,
-         const std::string& p)
-      : hostname(hname), username(uname), port(p) {}
+  Client(const std::string& username, const std::string& hostname,
+         const std::string& port)
+      : username(username), hostname(hostname), port(port) {}
 
  protected:
   virtual int connectTo();
@@ -50,7 +50,7 @@ class Client : public IClient {
   std::string hostname;
   std::string username;
   std::string port;
-  std::string session_token;
+  uint32_t session_token;
 
   IReply Login();
   IReply List();
@@ -70,6 +70,8 @@ int Client::connectTo() {
                                      grpc::InsecureChannelCredentials());
   stub_ = SNSService::NewStub(channel);
 
+  std::cout << "Connected to " << hostname << ":" << port << std::endl;
+
   IReply ire = Login();
   if (!ire.grpc_status.ok() || ire.comm_status != SUCCESS) {
     return -1;
@@ -79,7 +81,7 @@ int Client::connectTo() {
 }
 
 IReply Client::processCommand(std::string& input) {
-    std::string cmd = input;
+  std::string cmd = input;
   // use same parsing method as getCommand to split string
   std::size_t index = input.find_first_of(" ");
   // FOLLOW and UNFOLLOW
@@ -117,8 +119,8 @@ IReply Client::List() {
 
   ClientContext context;
 
-  Request request;
-  request.set_username(session_token);
+  ClientID request;
+  request.set_id(session_token);
 
   ListReply reply;
 
@@ -145,11 +147,11 @@ IReply Client::Follow(const std::string& username2) {
 
   ClientContext context;
 
-  Request request;
-  request.set_username(session_token);
-  request.add_arguments(username2);
+  FollowRequest request;
+  request.set_id(session_token);
+  request.set_follower(username2);
 
-  Reply reply;
+  Empty reply;
 
   ire.grpc_status = stub_->Follow(&context, request, &reply);
 
@@ -175,11 +177,11 @@ IReply Client::UnFollow(const std::string& username2) {
 
   ClientContext context;
 
-  Request request;
-  request.set_username(session_token);
-  request.add_arguments(username2);
+  FollowRequest request;
+  request.set_id(session_token);
+  request.set_follower(username2);
 
-  Reply reply;
+  Empty reply;
 
   ire.grpc_status = stub_->UnFollow(&context, request, &reply);
 
@@ -201,16 +203,16 @@ IReply Client::Login() {
 
   ClientContext context;
 
-  Request request;
+  LoginRequest request;
   request.set_username(username);
 
-  Reply reply;
+  ClientID reply;
 
   ire.grpc_status = stub_->Login(&context, request, &reply);
 
   if (ire.grpc_status.ok()) {
     ire.comm_status = SUCCESS;
-    session_token = reply.msg();
+    session_token = reply.id();
   } else if (ire.grpc_status.error_code() == grpc::StatusCode::ALREADY_EXISTS) {
     ire.comm_status = FAILURE_ALREADY_EXISTS;
   } else {
@@ -220,43 +222,23 @@ IReply Client::Login() {
   return ire;
 }
 
-// Timeline Command
 void Client::Timeline(const std::string& username) {
-  // ------------------------------------------------------------
-  // In this function, you are supposed to get into timeline mode.
-  // You may need to call a service method to communicate with
-  // the server. Use getPostMessage/displayPostMessage functions
-  // in client.cc file for both getting and displaying messages
-  // in timeline mode.
-  // ------------------------------------------------------------
-
-  // ------------------------------------------------------------
-  // IMPORTANT NOTICE:
-  //
-  // Once a user enter to timeline mode , there is no way
-  // to command mode. You don't have to worry about this situation,
-  // and you can terminate the client program by pressing
-  // CTRL-C (SIGINT)
-  // ------------------------------------------------------------
-
   ClientContext context;
-  context.AddMetadata("token", session_token);
+  context.AddMetadata("token", std::to_string(session_token));
 
   std::shared_ptr<ClientReaderWriter<Message, Message>> stream(
       stub_->Timeline(&context));
-  // check if stream is valid
+
   if (!stream) {
     std::cout << "Failed to create stream\n";
     return;
   }
-  // thread for user input
+
   std::thread writer([stream, username]() {
     // while stream is open
-    while (stream->Write(MakeMessage(username, getPostMessage()))) {
-    };
+    while (stream->Write(MakeMessage(username, getPostMessage())));
   });
 
-  // thread for server messages
   Message m;
   while (stream->Read(&m)) {
     time_t t = m.timestamp().seconds();
@@ -266,9 +248,6 @@ void Client::Timeline(const std::string& username) {
   writer.join();
 }
 
-//////////////////////////////////////////////
-// Main Function
-/////////////////////////////////////////////
 int main(int argc, char** argv) {
   std::string hostname = "localhost";
   std::string username = "default";
@@ -293,7 +272,7 @@ int main(int argc, char** argv) {
 
   std::cout << "Logging Initialized. Client starting...";
 
-  Client myc(hostname, username, port);
+  Client myc(username, hostname, port);
 
   myc.run();
 

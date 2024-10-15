@@ -1,69 +1,31 @@
 syntax = "proto3";
 package csce662;
-import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "sns.proto";
 
-// ------------------------------------------------------------
-// The coordinator service definition
-// These are the different functionalities exposed by service
-// ------------------------------------------------------------
-
-//Init and Heartbeat potentially redundant
 service CoordService{
-    rpc Heartbeat (ServerInfo) returns (Confirmation) {}
-    rpc GetServer (ID) returns (ServerInfo) {}
-    // ZooKeeper API here
-    // Create a path and place data in the znode
-    rpc create (PathAndData) returns (Status) {}
-    // Check if a path exists (checking if a Master is elected
-    rpc exists (Path) returns (Status) {}
+    rpc Register (ServerRegistration) returns (google.protobuf.Empty);
+    rpc Heartbeat (ServerID) returns (google.protobuf.Empty) {}
+    rpc GetServer (ClientID) returns (ServerInfo) {}
 }
 
-//server info message definition
-message ServerInfo{
-    int32 serverID = 1;
-    string hostname = 2;
-    string port = 3;
-    string type = 4;
-}
-// TODO: check which extra stuff in the coordinator.proto you dont need
-
-//confirmation message definition
-message Confirmation{
-    bool status = 1;
+enum ServerCapability{
+    SNS = 0;
 }
 
-//id message definition
-message ID{
+message ServerID{
     int32 id = 1;
 }
 
-
-// ServerList definition
-message ServerList{
-    repeated string serverList = 1; 
+message ServerRegistration {
+    ServerInfo info = 1;
+    repeated ServerCapability capabilities = 2; // what the server can do
 }
 
-
-// SynchService definition
-message SynchService{
-    string test = 1;
-}
-
-
-// PathAndData definition for rpc create
-message PathAndData{
-    string path = 1;
-    string data = 2;
-}
-
-// path definition for rpc exists
-message Path{
-    string path = 1;
-}
-
-// status definition for rpc exists and create
-message Status{
-    bool status = 1;
+message ServerInfo{
+    int32 id = 1;
+    string hostname = 2;
+    int32 port = 3;
 }
 
 
