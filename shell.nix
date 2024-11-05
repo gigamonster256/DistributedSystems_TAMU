@@ -7,5 +7,6 @@
       openssl
       pkg-config
     ];
+    env.GLOG_logtostderr = "1";
   };
 }
