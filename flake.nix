@@ -52,6 +52,7 @@
                 protobuf
                 openssl
                 pkg-config
+                rabbitmq-c
               ];
               env.GLOG_logtostderr = "1";
             }
