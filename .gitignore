@@ -1,5 +1,9 @@
-# direnv
-.direnv/
+# development environment
+.devenv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
 
 # c++ stuff
 *.o

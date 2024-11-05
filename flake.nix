@@ -2,26 +2,61 @@
   description = "CSCE 622: Distributed Systems";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+    nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
+    systems.url = "github:nix-systems/default";
+    devenv.url = "github:cachix/devenv";
+    devenv.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = inputs @ {
+  nixConfig = {
+    extra-trusted-public-keys = "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=";
+    extra-substituters = "https://devenv.cachix.org";
+  };
+
+  outputs = {
     self,
     nixpkgs,
+    devenv,
+    systems,
     ...
-  }: let
-    inherit (nixpkgs) lib;
-    systems = [
-      "x86_64-linux"
-      "x86_64-darwin"
-      "aarch64-darwin"
-    ];
-    pkgsFor = lib.genAttrs systems (
-      system: import nixpkgs {inherit system;}
-    );
-    forEachSystem = f: lib.genAttrs systems (system: f pkgsFor.${system});
+  } @ inputs: let
+    forEachSystem = nixpkgs.lib.genAttrs (import systems);
   in {
-    formatter = forEachSystem (pkgs: pkgs.alejandra);
-    devShells = forEachSystem (pkgs: import ./shell.nix {inherit pkgs;});
+    packages = forEachSystem (system: {
+      devenv-up = self.devShells.${system}.default.config.procfileScript;
+    });
+
+    formatter = forEachSystem (system: nixpkgs.legacyPackages.${system}.alejandra);
+
+    devShells =
+      forEachSystem
+      (system: let
+        pkgs = nixpkgs.legacyPackages.${system};
+      in {
+        default = devenv.lib.mkShell {
+          inherit inputs pkgs;
+          modules = [
+            {
+              languages.cplusplus.enable = true;
+              services.rabbitmq = {
+                enable = true;
+                managementPlugin.enable = true;
+              };
+              pre-commit.hooks = {
+                alejandra.enable = true;
+                typos.enable = true;
+              };
+              packages = with pkgs; [
+                grpc
+                glog
+                protobuf
+                openssl
+                pkg-config
+              ];
+              env.GLOG_logtostderr = "1";
+            }
+          ];
+        };
+      });
   };
 }
