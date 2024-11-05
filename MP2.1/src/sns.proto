@@ -4,15 +4,15 @@ import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 
 service SNSService {
-  rpc Login(LoginRequest) returns (ClientID) {}
-  rpc List(ClientID) returns (ListReply) {}
+  rpc Login(LoginRequest) returns (google.protobuf.Empty) {}
+  rpc List(ListRequest) returns (ListReply) {}
   rpc Follow(FollowRequest) returns (google.protobuf.Empty) {}
   rpc UnFollow(FollowRequest) returns (google.protobuf.Empty) {}
   rpc Timeline(stream Message) returns (stream Message) {}
 }
 
-message ClientID {
-  int32 id = 1;
+message ListRequest {
+  string username = 1;
 }
 
 message ListReply {
@@ -21,12 +21,13 @@ message ListReply {
 }
 
 message LoginRequest {
-  string username = 1;
-  string hashed_password = 2;
+  int32 id = 1;
+  string username = 2;
+  string hashed_password = 3;
 }
 
 message FollowRequest {
-  int32 id = 1;
+  string username = 1;
   string follower = 2;
 }
 

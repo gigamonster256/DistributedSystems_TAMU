@@ -15,11 +15,13 @@
 #include <mutex>
 #include <ostream>
 #include <string>
+#include <thread>
 
 #define log(severity, msg) \
   LOG(severity) << msg;    \
   google::FlushLogFiles(google::severity);
 
+#include "coordinator.grpc.pb.h"
 #include "sns.grpc.pb.h"
 
 // message serialization
@@ -31,21 +33,26 @@
 #define FOLLOWINGFILEEXTENSION (".following")
 #define TIMELINEFILEEXTENSION (".timeline")
 
-using csce662::ClientID;
-using csce662::FollowRequest;
-using csce662::ListReply;
-using csce662::LoginRequest;
-using csce662::Message;
-using csce662::SNSService;
-using google::protobuf::Duration;
+// globals
+uint32_t cluster_id = 1;
+uint32_t server_id = 1;
+uint32_t port = 3010;
+std::string coordinator_ip = "localhost";
+uint32_t coordinator_port = 9090;
+
+#define SERVER_FILENAME_PREFIX                                                \
+  ("server_" + std::to_string(cluster_id) + "_" + std::to_string(server_id) + \
+   "/")
+
+using namespace csce662;
+
 using google::protobuf::Empty;
 using google::protobuf::Timestamp;
+
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
-using grpc::ServerReader;
 using grpc::ServerReaderWriter;
-using grpc::ServerWriter;
 using grpc::Status;
 
 std::ostream& operator<<(std::ostream&, const Message&);
@@ -57,17 +64,16 @@ struct User {
   std::vector<std::string> followers;
   std::vector<std::string> following;
   ServerReaderWriter<Message, Message>* stream = nullptr;
+  bool logged_in = false;
   bool operator==(const User& c1) const { return (username == c1.username); }
-  User(std::string name) : username(name) {}
+  User(std::string name) : username(name) {};
 };
 
 std::unordered_map<std::string, User*> user_db;
-std::unordered_map<uint32_t, User*> user_sessions;
 std::mutex db_mtx;
-std::mutex session_mtx;
 
 void load_user_db() {
-  std::ifstream file(USERFILE);
+  std::ifstream file(SERVER_FILENAME_PREFIX + USERFILE);
   if (file.is_open()) {
     std::string username;
     while (std::getline(file, username)) {
@@ -77,7 +83,8 @@ void load_user_db() {
   }
   // populate following
   for (auto& [username, user] : user_db) {
-    std::ifstream file(username + FOLLOWINGFILEEXTENSION);
+    std::ifstream file(SERVER_FILENAME_PREFIX + username +
+                       FOLLOWINGFILEEXTENSION);
     if (file.is_open()) {
       std::string followed_username;
       while (std::getline(file, followed_username)) {
@@ -98,26 +105,13 @@ void load_user_db() {
   }
 }
 
-uint32_t generate_session(User* user) {
-  int iterations = 0;
-  std::lock_guard<std::mutex> lock(session_mtx);
-  while (iterations < 100) {
-    uint32_t token = rand();
-    if (user_sessions.find(token) == user_sessions.end()) {
-      user_sessions[token] = user;
-      return token;
-    }
-  }
-  return 0;
-}
-
 class SNSServiceImpl final : public SNSService::Service {
-  Status List(ServerContext*, const ClientID* client_id,
+  Status List(ServerContext*, const ListRequest* request,
               ListReply* list_reply) override {
-    User* user = user_sessions[client_id->id()];
+    User* user = user_db[request->username()];
     if (user == nullptr) {
-      log(ERROR, "List: Bad token");
-      return Status(grpc::StatusCode::UNAUTHENTICATED, "Invalid user");
+      log(ERROR, "List: User not found");
+      return Status(grpc::StatusCode::NOT_FOUND, "User not found");
     }
     log(INFO, "List request from " + user->username);
     for (auto& [username, user] : user_db) {
@@ -131,14 +125,17 @@ class SNSServiceImpl final : public SNSService::Service {
   }
 
   Status Follow(ServerContext*, const FollowRequest* request, Empty*) override {
-    User* following_user = user_sessions[request->id()];
+    User* following_user = user_db[request->username()];
     if (following_user == nullptr) {
-      log(ERROR, "Follow: Bad token");
-      return Status(grpc::StatusCode::UNAUTHENTICATED, "Invalid user");
+      log(ERROR, "Follow: User not found");
+      return Status(grpc::StatusCode::NOT_FOUND, "User not found");
     }
     log(INFO, "Follow request from " + following_user->username);
 
     const std::string& being_followed_username = request->follower();
+
+    log(INFO, "User " + following_user->username + " following " +
+                  being_followed_username);
 
     // make sure not following self
     if (following_user->username == being_followed_username) {
@@ -172,7 +169,8 @@ class SNSServiceImpl final : public SNSService::Service {
 
     // save following to file
     std::lock_guard<std::mutex> lock(following_user->mtx);
-    std::ofstream file(following_user->username + FOLLOWINGFILEEXTENSION);
+    std::ofstream file(SERVER_FILENAME_PREFIX + following_user->username +
+                       FOLLOWINGFILEEXTENSION);
     if (file.is_open()) {
       for (auto& username : following_user->following) {
         file << username << std::endl;
@@ -185,10 +183,10 @@ class SNSServiceImpl final : public SNSService::Service {
 
   Status UnFollow(ServerContext*, const FollowRequest* request,
                   Empty*) override {
-    User* unfollowing_user = user_sessions[request->id()];
+    User* unfollowing_user = user_db[request->username()];
     if (unfollowing_user == nullptr) {
-      log(ERROR, "UnFollow: Bad token");
-      return Status(grpc::StatusCode::UNAUTHENTICATED, "Invalid user");
+      log(ERROR, "UnFollow: User not found");
+      return Status(grpc::StatusCode::NOT_FOUND, "User not found");
     }
     log(INFO, "Unfollow request from " + unfollowing_user->username);
 
@@ -244,7 +242,8 @@ class SNSServiceImpl final : public SNSService::Service {
 
     // save follwing to file
     std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
-    std::ofstream file(unfollowing_user->username + FOLLOWINGFILEEXTENSION);
+    std::ofstream file(SERVER_FILENAME_PREFIX + unfollowing_user->username +
+                       FOLLOWINGFILEEXTENSION);
     if (file.is_open()) {
       for (auto& username : unfollowing_user->following) {
         file << username << std::endl;
@@ -254,7 +253,8 @@ class SNSServiceImpl final : public SNSService::Service {
 
     // clear timeline of posts
     std::vector<Message> messages;
-    std::ifstream file2(unfollowing_user->username + TIMELINEFILEEXTENSION);
+    std::ifstream file2(SERVER_FILENAME_PREFIX + unfollowing_user->username +
+                        TIMELINEFILEEXTENSION);
     if (file2.is_open()) {
       Message message;
       while (true) {
@@ -277,7 +277,8 @@ class SNSServiceImpl final : public SNSService::Service {
     }
 
     // save to file
-    std::ofstream file3(unfollowing_user->username + TIMELINEFILEEXTENSION);
+    std::ofstream file3(SERVER_FILENAME_PREFIX + unfollowing_user->username +
+                        TIMELINEFILEEXTENSION);
     if (file3.is_open()) {
       for (auto& message : messages) {
         file3 << message << std::endl;
@@ -288,7 +289,7 @@ class SNSServiceImpl final : public SNSService::Service {
     return Status::OK;
   }
 
-  Status Login(ServerContext*, const LoginRequest* request, ClientID* client_id) override {
+  Status Login(ServerContext*, const LoginRequest* request, Empty*) override {
     const std::string& username = request->username();
     log(INFO, "Login request from " + username);
 
@@ -299,7 +300,7 @@ class SNSServiceImpl final : public SNSService::Service {
       log(INFO, "New user " + username);
       user = new User(username);
       // populate
-      std::ofstream file(USERFILE, std::ios::app);
+      std::ofstream file(SERVER_FILENAME_PREFIX + USERFILE, std::ios::app);
       if (file.is_open()) {
         file << username << std::endl;
         file.close();
@@ -307,24 +308,16 @@ class SNSServiceImpl final : public SNSService::Service {
     }
     db_mtx.unlock();
 
-    for (auto& [_, logged_in_user] : user_sessions) {
-      if (*logged_in_user == *user) {
-        log(ERROR, "Login: User already logged in");
-        return Status(grpc::StatusCode::ALREADY_EXISTS,
-                      "User already logged in");
-      }
+    // check if user is already logged in
+    if (user->logged_in) {
+      log(ERROR, "Login: User already logged in");
+      return Status(grpc::StatusCode::ALREADY_EXISTS, "User already logged in");
     }
+
+    // set logged in
+    user->logged_in = true;
 
     log(INFO, "User " + username + " connected");
-
-    // generate a session token
-    uint32_t token = generate_session(user);
-    if (token == 0) {
-      log(ERROR, "Login: Failed to generate session token");
-      return Status(grpc::StatusCode::INTERNAL,
-                    "Failed to generate session token");
-    }
-    client_id->set_id(token);
 
     return Status::OK;
   }
@@ -333,25 +326,25 @@ class SNSServiceImpl final : public SNSService::Service {
                   ServerReaderWriter<Message, Message>* stream) override {
     // get session token from client metadata
     const auto& metadata = context->client_metadata();
-    uint32_t token = 0;
+    std::string username;
     for (auto it = metadata.begin(); it != metadata.end(); it++) {
-      if (it->first == "token") {
-        token = std::stoi(it->second.data());
+      if (it->first == "username") {
+        username = std::string(it->second.data(), it->second.length());
         break;
       }
     }
-    if (token == 0) {
-      log(ERROR, "Timeline: Token not found");
-      stream->WriteLast(Message(), grpc::WriteOptions());
-      return Status(grpc::StatusCode::FAILED_PRECONDITION, "Token missing");
+    if (username.empty()) {
+      log(ERROR, "Timeline: Invalid user");
+      return Status(grpc::StatusCode::FAILED_PRECONDITION, "Invalid user");
     }
 
+    log(INFO, "Timeline request from " + username);
+
     // save the stream so that who we are following can send us messages
-    User* user = user_sessions[token];
+    User* user = user_db[username];
 
     if (user == nullptr) {
       log(ERROR, "Timeline: Invalid user");
-      stream->WriteLast(Message(), grpc::WriteOptions());
       return Status(grpc::StatusCode::FAILED_PRECONDITION, "Invalid user");
     }
 
@@ -362,7 +355,8 @@ class SNSServiceImpl final : public SNSService::Service {
     // send the user their timeline
     {
       std::lock_guard<std::mutex> lock(user->mtx);
-      std::ifstream file(user->username + TIMELINEFILEEXTENSION);
+      std::ifstream file(SERVER_FILENAME_PREFIX + user->username +
+                         TIMELINEFILEEXTENSION);
       if (file.is_open()) {
         std::vector<Message> messages;
         Message message;
@@ -403,8 +397,9 @@ class SNSServiceImpl final : public SNSService::Service {
       // save to self file
       {
         std::lock_guard<std::mutex> lock(user->mtx);
-        std::ofstream file(user->username + TIMELINEFILEEXTENSION,
-                           std::ios::app);
+        std::ofstream file(
+            SERVER_FILENAME_PREFIX + user->username + TIMELINEFILEEXTENSION,
+            std::ios::app);
         if (file.is_open()) {
           file << message << std::endl;
           file.close();
@@ -418,7 +413,9 @@ class SNSServiceImpl final : public SNSService::Service {
         // save to followers files and self file
         {
           std::lock_guard<std::mutex> lock(user_db[follower]->mtx);
-          std::ofstream file(follower + TIMELINEFILEEXTENSION, std::ios::app);
+          std::ofstream file(
+              SERVER_FILENAME_PREFIX + follower + TIMELINEFILEEXTENSION,
+              std::ios::app);
           if (file.is_open()) {
             file << message << std::endl;
             file.close();
@@ -435,40 +432,103 @@ class SNSServiceImpl final : public SNSService::Service {
   }
 };
 
-void RunServer(const std::string& port_no) {
-  std::string server_address = "0.0.0.0:" + port_no;
+void RunServer(uint32_t cluster_id, uint32_t server_id, uint32_t port,
+               const std::string& coordinator_ip, uint32_t coordinator_port) {
+  // load the user database
+  load_user_db();
+
+  std::string server_address = "0.0.0.0:" + std::to_string(port);
   SNSServiceImpl service;
 
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
-  std::unique_ptr<Server> server(builder.BuildAndStart());
+  auto server = builder.BuildAndStart();
   std::cout << "Server listening on " << server_address << std::endl;
   log(INFO, "Server listening on " + server_address);
 
-  // load the user database
-  load_user_db();
+  log(INFO, "Registering with coordinator");
+
+  // register with coordinator
+  std::string coordinator_address =
+      coordinator_ip + ":" + std::to_string(coordinator_port);
+  std::shared_ptr<CoordService::Stub> stub =
+      CoordService::NewStub(grpc::CreateChannel(
+          coordinator_address, grpc::InsecureChannelCredentials()));
+  ServerRegistration registration;
+  ServerInfo* info = registration.mutable_info();
+  info->set_hostname("localhost");
+  info->set_port(port);
+  info->set_id(server_id);
+  registration.set_cluster_id(cluster_id);
+  Empty response;
+
+  grpc::ClientContext context;
+  Status status = stub->Register(&context, registration, &response);
+
+  if (!status.ok()) {
+    log(ERROR, "Failed to register with coordinator");
+    return;
+  }
+  log(INFO, "Registered with coordinator");
+
+  std::thread hb_thread([stub, cluster_id, server_id]() {
+    while (true) {
+      sleep(5);
+      grpc::ClientContext context;
+      HeartbeatMessage message;
+      message.set_cluster_id(cluster_id);
+      message.set_server_id(server_id);
+      Empty response;
+      Status status = stub->Heartbeat(&context, message, &response);
+      if (!status.ok()) {
+        log(ERROR, "Failed to send heartbeat to coordinator");
+        return;
+      }
+      log(INFO, "Heartbeat sent to coordinator");
+    }
+  });
+
   server->Wait();
+  // add support for graceful shutdown
+  hb_thread.join();
 }
 
 int main(int argc, char** argv) {
-  std::string port = "3010";
-
   int opt = 0;
-  while ((opt = getopt(argc, argv, "p:")) != -1) {
+  while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1) {
     switch (opt) {
+      case 'c':
+        cluster_id = std::stoi(optarg);
+        break;
+      case 's':
+        server_id = std::stoi(optarg);
+        break;
+      case 'h':
+        coordinator_ip = optarg;
+        break;
+      case 'k':
+        coordinator_port = std::stoi(optarg);
+        break;
       case 'p':
-        port = optarg;
+        port = std::stoi(optarg);
         break;
       default:
-        std::cerr << "Invalid Command Line Argument\n";
+        std::cerr << "Invalid Command Line Argument" << std::endl;
     }
   }
 
-  std::string log_file_name = std::string("server-") + port;
+  // create the server folder
+  std::string server_folder = SERVER_FILENAME_PREFIX;
+  std::string command = "mkdir -p " + server_folder;
+  system(command.c_str());
+
+  std::string log_file_name =
+      std::string("server-") + std::to_string(server_id) + ".log";
   google::InitGoogleLogging(log_file_name.c_str());
   log(INFO, "Logging Initialized. Server starting...");
-  RunServer(port);
+
+  RunServer(cluster_id, server_id, port, coordinator_ip, coordinator_port);
 
   return 0;
 }
