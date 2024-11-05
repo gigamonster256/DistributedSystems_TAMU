@@ -73,7 +73,8 @@ class CoordServiceImpl final : public CoordService::Service {
     // make sure server is not already registered
     // if (clusters[registration->cluster_id()].find(server_info.id()) !=
     //     clusters[registration->cluster_id()].end()) {
-    //   return Status(grpc::StatusCode::ALREADY_EXISTS, "Server already exists");
+    //   return Status(grpc::StatusCode::ALREADY_EXISTS, "Server already
+    //   exists");
     // }
     // add server info to appropriate capability groups
     clusters[registration->cluster_id()][server_info.id()] =

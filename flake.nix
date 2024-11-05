@@ -45,6 +45,7 @@
               pre-commit.hooks = {
                 alejandra.enable = true;
                 typos.enable = true;
+                clang-format.enable = true;
               };
               packages = with pkgs; [
                 grpc
