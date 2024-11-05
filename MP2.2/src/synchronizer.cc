@@ -464,7 +464,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
             server_ids.push_back(serverid);
         }
 
-        // update the count of how many follower sychronizer processes the coordinator has registered
+        // update the count of how many follower synchronizer processes the coordinator has registered
 
         // below here, you run all the update functions that synchronize the state across all the clusters
         // make any modifications as necessary to satisfy the assignments requirements
