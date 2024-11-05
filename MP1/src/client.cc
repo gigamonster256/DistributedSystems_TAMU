@@ -78,7 +78,7 @@ void IClient::displayCommandReply(const std::string& comm,
         std::cout << "Input username already exists, command failed\n";
         break;
       case FAILURE_NOT_EXISTS:
-        std::cout << "Input username does not exists, command failed\n";
+        std::cout << "Input username does not exist, command failed\n";
         break;
       case FAILURE_INVALID_USERNAME:
         std::cout << "Command failed with invalid username\n";
