@@ -54,6 +54,7 @@
                 openssl
                 pkg-config
                 rabbitmq-c
+                jsoncpp
               ];
               env.GLOG_logtostderr = "1";
             }

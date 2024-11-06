@@ -16,3 +16,6 @@ send: send.cpp
 
 receive: receive.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+clean:
+	rm -f send receive

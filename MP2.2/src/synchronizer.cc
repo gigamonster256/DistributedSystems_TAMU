@@ -1,13 +1,12 @@
-#include <amqp.h>
-#include <amqp_tcp_socket.h>
-#include <bits/fs_fwd.h>
 #include <fcntl.h>
 #include <glog/logging.h>
 #include <google/protobuf/duration.pb.h>
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
-#include <jsoncpp/json/json.h>
+#include <json/json.h>
+#include <rabbitmq-c/amqp.h>
+#include <rabbitmq-c/tcp_socket.h>
 #include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,26 +30,16 @@
 #include <vector>
 
 #include "coordinator.grpc.pb.h"
-#include "coordinator.pb.h"
 #include "sns.grpc.pb.h"
-#include "sns.pb.h"
 
 #define log(severity, msg) \
   LOG(severity) << msg;    \
   google::FlushLogFiles(google::severity);
 
-namespace fs = std::filesystem;
+using namespace csce662;
 
-using csce662::AllUsers;
-using csce662::Confirmation;
-using csce662::CoordService;
-using csce662::ID;
-using csce662::ServerInfo;
-using csce662::ServerList;
-using csce662::SynchronizerListReply;
-using csce662::SynchService;
-using google::protobuf::Duration;
 using google::protobuf::Timestamp;
+
 using grpc::ClientContext;
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -59,14 +48,11 @@ using grpc::ServerReader;
 using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
-// tl = timeline, fl = follow list
-using csce662::TLFL;
 
 int synchID = 1;
 int clusterID = 1;
 bool isMaster = false;
-int total_number_of_registered_synchronizers =
-    6;  // update this by asking coordinator
+int total_number_of_registered_synchronizers = 6;
 std::string coordAddr;
 std::string clusterSubdirectory;
 std::vector<std::string> otherHosts;
@@ -138,7 +124,7 @@ class SynchronizerRabbitMQ {
 
  public:
   SynchronizerRabbitMQ(const std::string &host, int p, int id)
-      : hostname(host), port(p), channel(1), synchID(id) {
+      : channel(1), hostname(host), port(p), synchID(id) {
     setupRabbitMQ();
     declareQueue("synch" + std::to_string(synchID) + "_users_queue");
     declareQueue("synch" + std::to_string(synchID) +
@@ -272,11 +258,12 @@ class SynchronizerRabbitMQ {
       std::vector<std::string> timeline = get_tl_or_fl(synchID, clientId, true);
       std::vector<std::string> followers = getFollowersOfUser(clientId);
 
-      for (const auto &follower : followers) {
-        // send the timeline updates of your current user to all its followers
+      // for (const auto &follower : followers) {
+      //   // send the timeline updates of your current user to all its
+      //   followers
 
-        // YOUR CODE HERE
-      }
+      //   // YOUR CODE HERE
+      // }
     }
   }
 
@@ -320,16 +307,16 @@ void run_synchronizer(std::string coordIP, std::string coordPort,
                       std::string port, int synchID,
                       SynchronizerRabbitMQ &rabbitMQ);
 
-class SynchServiceImpl final : public SynchService::Service {
-  // You do not need to modify this in any way
-};
+// class SynchServiceImpl final : public SynchService::Service {
+//   // You do not need to modify this in any way
+// };
 
 void RunServer(std::string coordIP, std::string coordPort, std::string port_no,
                int synchID) {
   // localhost = 127.0.0.1
   std::string server_address("127.0.0.1:" + port_no);
   log(INFO, "Starting synchronizer server at " + server_address);
-  SynchServiceImpl service;
+  // SynchServiceImpl service;
   // grpc::EnableDefaultHealthCheckService(true);
   // grpc::reflection::InitProtoReflectionServerBuilderPlugin();
   ServerBuilder builder;
@@ -337,7 +324,7 @@ void RunServer(std::string coordIP, std::string coordPort, std::string port_no,
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   // Register "service" as the instance through which we'll communicate with
   // clients. In this case it corresponds to an *synchronous* service.
-  builder.RegisterService(&service);
+  // builder.RegisterService(&service);
   // Finally assemble the server.
   std::unique_ptr<Server> server(builder.BuildAndStart());
   std::cout << "Server listening on " << server_address << std::endl;
@@ -369,7 +356,7 @@ int main(int argc, char **argv) {
   int opt = 0;
   std::string coordIP;
   std::string coordPort;
-  std::string port = "3029";
+  uint32_t port = 3029;
 
   while ((opt = getopt(argc, argv, "h:k:p:i:")) != -1) {
     switch (opt) {
@@ -380,7 +367,7 @@ int main(int argc, char **argv) {
         coordPort = optarg;
         break;
       case 'p':
-        port = optarg;
+        port = atoi(optarg);
         break;
       case 'i':
         synchID = std::stoi(optarg);
@@ -390,7 +377,8 @@ int main(int argc, char **argv) {
     }
   }
 
-  std::string log_file_name = std::string("synchronizer-") + port;
+  std::string log_file_name =
+      std::string("synchronizer-") + std::to_string(port);
   google::InitGoogleLogging(log_file_name.c_str());
   log(INFO, "Logging Initialized. Server starting...");
 
@@ -399,17 +387,16 @@ int main(int argc, char **argv) {
   ServerInfo serverInfo;
   serverInfo.set_hostname("localhost");
   serverInfo.set_port(port);
-  serverInfo.set_type("synchronizer");
-  serverInfo.set_serverid(synchID);
-  serverInfo.set_clusterid(clusterID);
-  Heartbeat(coordIP, coordPort, serverInfo, synchID);
+  // serverInfo.set_serverid(synchID);
+  // serverInfo.set_clusterid(clusterID);
+  // Heartbeat(coordIP, coordPort, serverInfo, synchID);
 
-  RunServer(coordIP, coordPort, port, synchID);
+  // RunServer(coordIP, coordPort, port, synchID);
   return 0;
 }
 
 void run_synchronizer(std::string coordIP, std::string coordPort,
-                      std::string port, int synchID,
+                      std::string /*port*/, int /*synchID*/,
                       SynchronizerRabbitMQ &rabbitMQ) {
   // setup coordinator stub
   std::string target_str = coordIP + ":" + coordPort;
@@ -418,12 +405,12 @@ void run_synchronizer(std::string coordIP, std::string coordPort,
       grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials())));
 
   ServerInfo msg;
-  Confirmation c;
+  // Confirmation c;
 
-  msg.set_serverid(synchID);
-  msg.set_hostname("127.0.0.1");
-  msg.set_port(port);
-  msg.set_type("follower");
+  // msg.set_serverid(synchID);
+  // msg.set_hostname("127.0.0.1");
+  // msg.set_port(port);
+  // msg.set_type("follower");
 
   // TODO: begin synchronization process
   while (true) {
@@ -431,25 +418,25 @@ void run_synchronizer(std::string coordIP, std::string coordPort,
     sleep(5);
 
     grpc::ClientContext context;
-    ServerList followerServers;
-    ID id;
-    id.set_id(synchID);
+    // ServerList followerServers;
+    // ID id;
+    // id.set_id(synchID);
 
     // making a request to the coordinator to see count of follower
     // synchronizers
-    coord_stub_->GetAllFollowerServers(&context, id, &followerServers);
+    // coord_stub_->GetAllFollowerServers(&context, id, &followerServers);
 
     std::vector<int> server_ids;
     std::vector<std::string> hosts, ports;
-    for (std::string host : followerServers.hostname()) {
-      hosts.push_back(host);
-    }
-    for (std::string port : followerServers.port()) {
-      ports.push_back(port);
-    }
-    for (int serverid : followerServers.serverid()) {
-      server_ids.push_back(serverid);
-    }
+    // for (std::string host : followerServers.hostname()) {
+    //   hosts.push_back(host);
+    // }
+    // for (std::string port : followerServers.port()) {
+    //   ports.push_back(port);
+    // }
+    // for (int serverid : followerServers.serverid()) {
+    //   server_ids.push_back(serverid);
+    // }
 
     // update the count of how many follower synchronizer processes the
     // coordinator has registered
@@ -498,7 +485,7 @@ std::vector<std::string> get_lines_from_file(std::string filename) {
 }
 
 void Heartbeat(std::string coordinatorIp, std::string coordinatorPort,
-               ServerInfo serverInfo, int syncID) {
+               ServerInfo /*serverInfo*/, int /*syncID*/) {
   // For the synchronizer, a single initial heartbeat RPC acts as an
   // initialization method which servers to register the synchronizer with the
   // coordinator and determine whether it is a master
@@ -523,7 +510,7 @@ bool file_contains_user(std::string filename, std::string user) {
                         clusterSubdirectory + "_" + filename;
   sem_t *fileSem = sem_open(semName.c_str(), O_CREAT);
   users = get_lines_from_file(filename);
-  for (int i = 0; i < users.size(); i++) {
+  for (size_t i = 0; i < users.size(); i++) {
     // std::cout<<"Checking if "<<user<<" = "<<users[i]<<std::endl;
     if (user == users[i]) {
       // std::cout<<"found"<<std::endl;
@@ -556,7 +543,7 @@ std::vector<std::string> get_all_users_func(int synchID) {
     return slave_user_list;
 }
 
-std::vector<std::string> get_tl_or_fl(int synchID, int clientID, bool tl) {
+std::vector<std::string> get_tl_or_fl(int /*synchID*/, int clientID, bool tl) {
   // std::string master_fn =
   // "./master"+std::to_string(synchID)+"/"+std::to_string(clientID);
   // std::string slave_fn = "./slave"+std::to_string(synchID)+"/" +

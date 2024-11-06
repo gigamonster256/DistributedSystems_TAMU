@@ -1,0 +1,38 @@
+syntax = "proto3";
+package csce662;
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service SNSService {
+  rpc Login(LoginRequest) returns (google.protobuf.Empty) {}
+  rpc List(ListRequest) returns (ListReply) {}
+  rpc Follow(FollowRequest) returns (google.protobuf.Empty) {}
+  rpc UnFollow(FollowRequest) returns (google.protobuf.Empty) {}
+  rpc Timeline(stream Message) returns (stream Message) {}
+  rpc Ping(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+}
+
+message ListRequest {
+  string username = 1;
+}
+
+message ListReply {
+  repeated string all_users = 1;
+  repeated string followers = 2;
+}
+
+message LoginRequest {
+  int32 id = 1;
+  string username = 2;
+}
+
+message FollowRequest {
+  string username = 1;
+  string follower = 2;
+}
+
+message Message {
+  string username = 1;
+  string msg = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}
