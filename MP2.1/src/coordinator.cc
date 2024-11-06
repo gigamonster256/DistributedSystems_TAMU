@@ -48,7 +48,7 @@ std::unordered_map<ClusterID,
 std::unordered_map<ClusterID, std::unordered_map<ServerID, time_t>>
     server_status;
 
-const std::time_t now() {
+std::time_t now() {
   return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 }
 
@@ -62,9 +62,8 @@ const ServerInfo* get_server(uint32_t client_id) {
 }
 
 class CoordServiceImpl final : public CoordService::Service {
-  Status Register(ServerContext* context,
-                  const ServerRegistration* registration,
-                  Empty* response) override {
+  Status Register(ServerContext*, const ServerRegistration* registration,
+                  Empty*) override {
     const ServerInfo& server_info = registration->info();
     log(INFO, "Register request from " + server_info.hostname() + ":" +
                   std::to_string(server_info.port()));
@@ -82,7 +81,7 @@ class CoordServiceImpl final : public CoordService::Service {
     return Status::OK;
   }
 
-  Status Heartbeat(ServerContext* context, const HeartbeatMessage* message,
+  Status Heartbeat(ServerContext*, const HeartbeatMessage* message,
                    Empty*) override {
     log(INFO,
         "Heartbeat from cluster: " + std::to_string(message->cluster_id()) +
@@ -91,7 +90,7 @@ class CoordServiceImpl final : public CoordService::Service {
     return Status::OK;
   }
 
-  Status GetServer(ServerContext* context, const ClientID* clientid,
+  Status GetServer(ServerContext*, const ClientID* clientid,
                    ServerInfo* response) override {
     log(INFO,
         "GetServer request from client id: " + std::to_string(clientid->id()));
