@@ -482,7 +482,7 @@ void RunServer(const std::string& server_folder, uint32_t port) {
 }
 
 int main(int argc, char** argv) {
-  uint32_t port = 9090;
+  uint32_t port = 3010;
 
   int opt = 0;
   while ((opt = getopt(argc, argv, "p:")) != -1) {

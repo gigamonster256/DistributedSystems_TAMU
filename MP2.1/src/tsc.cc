@@ -257,7 +257,7 @@ SNSStatus Client::Ping() {
 
 int main(int argc, char** argv) {
   std::string hostname = "localhost";
-  uint32_t port = 9090;
+  uint32_t port = 3010;
   std::string username = "u1";
 
   int opt = 0;
