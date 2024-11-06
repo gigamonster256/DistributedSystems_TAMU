@@ -21,7 +21,7 @@ PROTOC = protoc
 GRPC_CPP_PLUGIN = grpc_cpp_plugin
 GRPC_CPP_PLUGIN_PATH ?= `which $(GRPC_CPP_PLUGIN)`
 
-PROTOS_PATH = ./protos
+PROTOS_PATH = .
 
 vpath %.proto $(PROTOS_PATH)
 
@@ -46,4 +46,4 @@ clean: clean_db
 	rm -f *~ *.o *.pb.cc *.pb.h tsc tsd
 
 clean_db:
-	rm -f users.txt *.following *.timeline
+	rm -rf server

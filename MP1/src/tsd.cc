@@ -1,8 +1,10 @@
+#include <errno.h>
 #include <glog/logging.h>
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <ctime>
@@ -14,7 +16,6 @@
 #include <mutex>
 #include <ostream>
 #include <string>
-#include <thread>
 
 #include "sns.grpc.pb.h"
 
@@ -55,7 +56,6 @@ struct User {
 
 class SNSServiceImpl final : public SNSService::Service {
   // config data
-  uint32_t port;
   std::string database_folder_path;
 
   // runtime data
@@ -69,6 +69,8 @@ class SNSServiceImpl final : public SNSService::Service {
   std::string user_timeline_file(const std::string& username);
 
   // service methods
+  Status Login(ServerContext*, const LoginRequest* request,
+               Empty* response) override;
   Status List(ServerContext*, const ListRequest* request,
               ListReply* list_reply) override;
   Status Follow(ServerContext*, const FollowRequest* request, Empty*) override;
@@ -76,6 +78,12 @@ class SNSServiceImpl final : public SNSService::Service {
                   Empty*) override;
   Status Timeline(ServerContext* context, TimelineStream* stream) override;
   Status Ping(ServerContext*, const Empty* request, Empty* response) override;
+
+ public:
+  SNSServiceImpl(const std::string& server_folder)
+      : database_folder_path(server_folder) {
+    load_user_db();
+  }
 };
 
 Status SNSServiceImpl::List(ServerContext*, const ListRequest* request,
@@ -98,14 +106,14 @@ Status SNSServiceImpl::List(ServerContext*, const ListRequest* request,
 
 Status SNSServiceImpl::Follow(ServerContext*, const FollowRequest* request,
                               Empty*) {
-  User* following_user = user_db[request->username()];
+  auto following_user = user_db[request->username()];
   if (following_user == nullptr) {
     log(ERROR, "Follow: User not found");
     return Status(grpc::StatusCode::NOT_FOUND, "User not found");
   }
   log(INFO, "Follow request from " + following_user->username);
 
-  const std::string& being_followed_username = request->follower();
+  const auto& being_followed_username = request->follower();
 
   log(INFO, "User " + following_user->username + " following " +
                 being_followed_username);
@@ -117,10 +125,10 @@ Status SNSServiceImpl::Follow(ServerContext*, const FollowRequest* request,
   }
 
   // get the client that is being followed
-  User* being_followed_client = user_db[being_followed_username];
+  auto being_followed_client = user_db[being_followed_username];
   if (being_followed_client == nullptr) {
     log(ERROR, "Follow: User not found");
-    return Status(grpc::StatusCode::NOT_FOUND, "User not found");
+    return Status(grpc::StatusCode::NOT_FOUND, "Following user not found");
   }
 
   // make sure not already following
@@ -132,13 +140,14 @@ Status SNSServiceImpl::Follow(ServerContext*, const FollowRequest* request,
   }
 
   // add to following lists
-  following_user->mtx.lock();
-  following_user->following.push_back(being_followed_username);
-  following_user->mtx.unlock();
-
-  being_followed_client->mtx.lock();
-  being_followed_client->followers.push_back(following_user->username);
-  being_followed_client->mtx.unlock();
+  {
+    std::lock_guard<std::mutex> lock(following_user->mtx);
+    following_user->following.push_back(being_followed_username);
+  }
+  {
+    std::lock_guard<std::mutex> lock(being_followed_client->mtx);
+    being_followed_client->followers.push_back(following_user->username);
+  }
 
   // save following to file
   std::lock_guard<std::mutex> lock(following_user->mtx);
@@ -156,7 +165,7 @@ Status SNSServiceImpl::Follow(ServerContext*, const FollowRequest* request,
 
 Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
                                 Empty*) {
-  User* unfollowing_user = user_db[request->username()];
+  auto unfollowing_user = user_db[request->username()];
   if (unfollowing_user == nullptr) {
     log(ERROR, "UnFollow: User not found");
     return Status(grpc::StatusCode::NOT_FOUND, "User not found");
@@ -164,7 +173,7 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
   log(INFO, "Unfollow request from " + unfollowing_user->username);
 
   // get the user that this user wants to unfollow
-  std::string being_unfollowed_username = request->follower();
+  const auto& being_unfollowed_username = request->follower();
 
   // make sure not unfollowing self
   if (unfollowing_user->username == being_unfollowed_username) {
@@ -173,10 +182,10 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
   }
 
   // get the client that is being unfollowed
-  User* being_unfollowed_user = user_db[being_unfollowed_username];
+  auto being_unfollowed_user = user_db[being_unfollowed_username];
   if (being_unfollowed_user == nullptr) {
     log(ERROR, "UnFollow: User not found");
-    return Status(grpc::StatusCode::NOT_FOUND, "User not found");
+    return Status(grpc::StatusCode::NOT_FOUND, "Following user not found");
   }
 
   // make sure already following
@@ -193,70 +202,75 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
   }
 
   // remove from following lists
-  unfollowing_user->mtx.lock();
-  for (auto it = unfollowing_user->following.begin();
-       it != unfollowing_user->following.end(); it++) {
-    if (*it == being_unfollowed_username) {
-      unfollowing_user->following.erase(it);
-      break;
+  {
+    std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
+    for (auto it = unfollowing_user->following.begin();
+         it != unfollowing_user->following.end(); it++) {
+      if (*it == being_unfollowed_username) {
+        unfollowing_user->following.erase(it);
+        break;
+      }
     }
   }
-  unfollowing_user->mtx.unlock();
-
-  being_unfollowed_user->mtx.lock();
-  for (auto it = being_unfollowed_user->followers.begin();
-       it != being_unfollowed_user->followers.end(); it++) {
-    if (*it == unfollowing_user->username) {
-      being_unfollowed_user->followers.erase(it);
-      break;
+  {
+    std::lock_guard<std::mutex> lock(being_unfollowed_user->mtx);
+    for (auto it = being_unfollowed_user->followers.begin();
+         it != being_unfollowed_user->followers.end(); it++) {
+      if (*it == unfollowing_user->username) {
+        being_unfollowed_user->followers.erase(it);
+        break;
+      }
     }
   }
-  being_unfollowed_user->mtx.unlock();
 
   // save following to file
-  std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
-  auto filename = user_following_file(unfollowing_user->username);
-  std::ofstream file(filename);
-  if (file.is_open()) {
-    for (auto& username : unfollowing_user->following) {
-      file << username << std::endl;
+  {
+    std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
+    auto filename = user_following_file(unfollowing_user->username);
+    std::ofstream file(filename);
+    if (file.is_open()) {
+      for (auto& username : unfollowing_user->following) {
+        file << username << std::endl;
+      }
+      file.close();
     }
-    file.close();
   }
 
   // clear timeline of posts
-  std::vector<Message> messages;
-  filename = user_timeline_file(unfollowing_user->username);
-  std::ifstream file2(filename);
-  if (file2.is_open()) {
-    Message message;
-    while (true) {
-      file2 >> message;
-      std::string line;
-      std::getline(file2, line);
-      if (file2.eof()) {
-        break;
+  {
+    std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
+    std::vector<Message> messages;
+    auto filename = user_timeline_file(unfollowing_user->username);
+    std::ifstream old_file(filename);
+    if (old_file.is_open()) {
+      Message message;
+      while (true) {
+        old_file >> message;
+        std::string line;
+        std::getline(old_file, line);
+        if (old_file.eof()) {
+          break;
+        }
+        if (message.username() != being_unfollowed_username) {
+          messages.push_back(message);
+        }
       }
-      if (message.username() != being_unfollowed_username) {
-        messages.push_back(message);
+      old_file.close();
+    }
+
+    // garbage collect
+    if (messages.size() > 20) {
+      messages.erase(messages.begin(), messages.end() - 20);
+    }
+
+    // save to file
+    auto new_file = std::ofstream(filename);
+    if (new_file.is_open()) {
+      for (auto& message : messages) {
+        new_file << message << std::endl;
       }
+      new_file.close();
     }
-    file.close();
-  }
-
-  // garbage collect
-  if (messages.size() > 20) {
-    messages.erase(messages.begin(), messages.end() - 20);
-  }
-
-  // save to file
-  filename = user_timeline_file(unfollowing_user->username);
-  file = std::ofstream(filename);
-  if (file.is_open()) {
-    for (auto& message : messages) {
-      file << message << std::endl;
-    }
-    file.close();
   }
 
   return Status::OK;
@@ -268,21 +282,22 @@ Status SNSServiceImpl::Login(ServerContext*, const LoginRequest* request,
   log(INFO, "Login request from " + username);
 
   // get/create user
-  db_mtx.lock();
-  User*& user = user_db[username];
-  if (user == nullptr) {
-    log(INFO, "New user " + username);
-    user = new User(username);
-    // populate
-    auto filename = user_database_file();
-    std::ofstream file(filename, std::ios::app);
-    if (file.is_open()) {
-      file << username << std::endl;
-      file.close();
+  User* user = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(db_mtx);
+    user = user_db[username];
+    if (user == nullptr) {
+      log(INFO, "New user " + username);
+      user = user_db[username] = new User(username);
+      // populate
+      auto filename = user_database_file();
+      std::ofstream file(filename, std::ios::app);
+      if (file.is_open()) {
+        file << username << std::endl;
+        file.close();
+      }
     }
   }
-  db_mtx.unlock();
-
   // check if user is already logged in
   if (user->logged_in) {
     log(ERROR, "Login: User already logged in");
@@ -298,7 +313,7 @@ Status SNSServiceImpl::Login(ServerContext*, const LoginRequest* request,
 }
 
 Status SNSServiceImpl::Timeline(ServerContext* context,
-                                ServerReaderWriter<Message, Message>* stream) {
+                                TimelineStream* stream) {
   // get session token from client metadata
   const auto& metadata = context->client_metadata();
   std::string username;
@@ -309,11 +324,9 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
     }
   }
   if (username.empty()) {
-    log(ERROR, "Timeline: Invalid user");
-    return Status(grpc::StatusCode::FAILED_PRECONDITION, "Invalid user");
+    log(ERROR, "Timeline: Missing username");
+    return Status(grpc::StatusCode::FAILED_PRECONDITION, "Missing username");
   }
-
-  log(INFO, "Timeline request from " + username);
 
   // save the stream so that who we are following can send us messages
   User* user = user_db[username];
@@ -372,7 +385,7 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
     // save to self file
     {
       std::lock_guard<std::mutex> lock(user->mtx);
-      filename = user_timeline_file(user->username);
+      auto filename = user_timeline_file(user->username);
       std::ofstream file(filename, std::ios::app);
       if (file.is_open()) {
         file << message << std::endl;
@@ -404,8 +417,7 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
   return Status::OK;
 }
 
-Status SNSServiceImpl::Ping(ServerContext*, const Empty* request,
-                            Empty* response) {
+Status SNSServiceImpl::Ping(ServerContext*, const Empty*, Empty*) {
   return Status::OK;
 }
 
@@ -443,10 +455,21 @@ void SNSServiceImpl::load_user_db() {
   }
 }
 
-void RunServer(uint32_t cluster_id, uint32_t server_id, uint32_t port,
-               const std::string& coordinator_ip, uint32_t coordinator_port) {
+std::string SNSServiceImpl::user_database_file() {
+  return database_folder_path + "users.txt";
+}
+
+std::string SNSServiceImpl::user_following_file(const std::string& username) {
+  return database_folder_path + username + ".following";
+}
+
+std::string SNSServiceImpl::user_timeline_file(const std::string& username) {
+  return database_folder_path + username + ".timeline";
+}
+
+void RunServer(const std::string& server_folder, uint32_t port) {
   std::string server_address = "0.0.0.0:" + std::to_string(port);
-  SNSServiceImpl service;
+  SNSServiceImpl service(server_folder);
 
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
@@ -459,21 +482,11 @@ void RunServer(uint32_t cluster_id, uint32_t server_id, uint32_t port,
 }
 
 int main(int argc, char** argv) {
+  uint32_t port = 9090;
+
   int opt = 0;
-  while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1) {
+  while ((opt = getopt(argc, argv, "p:")) != -1) {
     switch (opt) {
-      case 'c':
-        cluster_id = std::stoi(optarg);
-        break;
-      case 's':
-        server_id = std::stoi(optarg);
-        break;
-      case 'h':
-        coordinator_ip = optarg;
-        break;
-      case 'k':
-        coordinator_port = std::stoi(optarg);
-        break;
       case 'p':
         port = std::stoi(optarg);
         break;
@@ -483,16 +496,21 @@ int main(int argc, char** argv) {
   }
 
   // create the server folder
-  std::string server_folder = SERVER_FILENAME_PREFIX;
-  std::string command = "mkdir -p " + server_folder;
-  system(command.c_str());
+  std::string server_folder = "server/";
+  if (mkdir(server_folder.c_str(), 0777) == -1) {
+    if (errno != EEXIST) {
+      log(ERROR, "Failed to create server folder");
+      perror("mkdir");
+      return 1;
+    }
+  }
 
-  std::string log_file_name =
-      std::string("server-") + std::to_string(server_id) + ".log";
+  // initialize logging
+  std::string log_file_name = server_folder + "server.log";
   google::InitGoogleLogging(log_file_name.c_str());
   log(INFO, "Logging Initialized. Server starting...");
 
-  RunServer(cluster_id, server_id, port, coordinator_ip, coordinator_port);
+  RunServer(server_folder, port);
 
   return 0;
 }

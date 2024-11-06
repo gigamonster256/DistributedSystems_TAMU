@@ -10,8 +10,8 @@ for i in {0..5} ; do
     fi
 done
 
-# clean up
-rm -f users.txt *.following *.timeline
+# clean up database
+rm -rf server
 
 if [ $failed -eq 1 ]; then
     echo "Some tests failed"

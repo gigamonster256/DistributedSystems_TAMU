@@ -33,7 +33,8 @@ void IClient::run() {
     auto reply = processCommand(cmd);
     displayCommandReply(cmd.first, reply);
     if (cmd.first == TIMELINE && reply.first == SUCCESS) {
-      // should never get here (no way to exit timeline mode)
+      std::cout << "Now you are in the timeline" << std::endl;
+      processTimeline();
       assert(0);
     }
   }
@@ -73,12 +74,8 @@ const SNSCommand IClient::getCommand() const {
     // command without argument
     else {
       auto type = getCommandType(input);
-      if (type == INVALID) {
+      if (type == INVALID || (type != LIST && type != TIMELINE)) {
         std::cout << "Invalid Command" << std::endl;
-        continue;
-      }
-      if (type != LIST && type != TIMELINE) {
-        std::cout << "Invalid Input -- No Arguments Given" << std::endl;
         continue;
       }
       return std::make_pair(type, std::nullopt);

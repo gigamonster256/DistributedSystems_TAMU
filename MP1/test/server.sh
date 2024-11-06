@@ -7,6 +7,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-rm -f users.txt *.following *.timeline
+# clean up database
+rm -rf server
+mkdir server
 
-../src/tsd
+../src/tsd 2> server/tsd.err
