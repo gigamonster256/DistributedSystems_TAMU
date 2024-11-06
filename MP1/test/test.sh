@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 
+# compile
+make -C ../src &> /dev/null
+
+if [ $? -ne 0 ]; then
+    echo "Compilation failed"
+    exit 1
+fi
+
 failed=0
 for i in {0..5} ; do
     echo "Test $i"
