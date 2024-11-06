@@ -9,6 +9,7 @@ service SNSService {
   rpc Follow(FollowRequest) returns (google.protobuf.Empty) {}
   rpc UnFollow(FollowRequest) returns (google.protobuf.Empty) {}
   rpc Timeline(stream Message) returns (stream Message) {}
+  rpc Ping(google.protobuf.Empty) returns (google.protobuf.Empty) {}
 }
 
 message ListRequest {
@@ -23,7 +24,6 @@ message ListReply {
 message LoginRequest {
   int32 id = 1;
   string username = 2;
-  string hashed_password = 3;
 }
 
 message FollowRequest {

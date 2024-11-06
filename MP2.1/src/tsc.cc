@@ -1,15 +1,10 @@
 #include <grpc++/grpc++.h>
-#include <unistd.h>
 
-#include <csignal>
-#include <iostream>
-#include <memory>
-#include <string>
+#include <map>
 #include <thread>
-#include <vector>
+#include <variant>
 
 #include "client.h"
-#include "coordinator.grpc.pb.h"
 #include "sns.grpc.pb.h"
 
 using namespace csce662;
@@ -32,90 +27,90 @@ Message MakeMessage(const std::string& username, const std::string& msg) {
   return m;
 }
 
-SNSStatus convertGRPCStatusToSNSStatus(const Status& status) {
+typedef std::pair<std::string, SNSStatus> SNSReason;
+typedef std::vector<SNSReason> SNSReasons;
+typedef std::map<grpc::StatusCode, std::variant<SNSStatus, SNSReasons>>
+    SNSStatusMapping;
+
+SNSStatus convertGRPCStatusToSNSStatus(const Status& status,
+                                       const SNSStatusMapping& mapping) {
   if (status.ok()) {
     return SUCCESS;
-  } else if (status.error_code() == grpc::StatusCode::ALREADY_EXISTS) {
-    return FAILURE_ALREADY_EXISTS;
-  } else if (status.error_code() == grpc::StatusCode::NOT_FOUND) {
-    return FAILURE_NOT_EXISTS;
-  } else {
+  }
+  auto it = mapping.find(status.error_code());
+  if (it == mapping.end()) {
     return FAILURE_UNKNOWN;
   }
+  if (std::holds_alternative<SNSStatus>(it->second)) {
+    return std::get<SNSStatus>(it->second);
+  }
+  auto& vec =
+      std::get<std::vector<std::pair<std::string, SNSStatus>>>(it->second);
+  for (const auto& [msg, sns] : vec) {
+    if (status.error_message() == msg) {
+      return sns;
+    }
+  }
+  return FAILURE_UNKNOWN;
 }
 
 class Client : public IClient {
  public:
-  Client(const uint32_t user_id, const std::string& hostname, uint32_t port)
-      : username(std::string("u") + std::to_string(user_id)),
-        hostname(hostname),
-        port(port),
-        user_id(user_id) {}
+  Client(const std::string& username, const std::string& hostname,
+         uint32_t port)
+      : username(username), hostname(hostname), port(port) {}
 
  protected:
-  virtual SNSStatus connect();
-  virtual SNSReply processCommand(SNSCommand);
-  virtual void processTimeline();
+  virtual SNSStatus connect() override;
+  virtual SNSReply processCommand(SNSCommand) override;
+  virtual void processTimeline() override;
 
  private:
   // config data
   std::string username;
   std::string hostname;
   uint32_t port;
-  uint32_t user_id;
 
+  // grpc methods
   SNSStatus Login();
   SNSReply List();
   SNSStatus Follow(const std::string& username);
   SNSStatus UnFollow(const std::string& username);
-  std::pair<std::string, uint32_t> getHostnameAndPort() const;
   SNSStatus Timeline();
+  SNSStatus Ping();
+
+  // internal data
+  std::shared_ptr<SNSService::Stub> stub_;
 };
 
-std::shared_ptr<grpc::Channel> channel_;
-std::unique_ptr<SNSService::Stub> stub_;
-
-void reconnectChannel() { channel_->GetState(true); }
-
 SNSStatus Client::connect() {
-  auto hostname_and_port = getHostnameAndPort();
-  std::string& hostname = hostname_and_port.first;
-  uint32_t& port = hostname_and_port.second;
-  channel_ = grpc::CreateChannel(hostname + ":" + std::to_string(port),
-                                 grpc::InsecureChannelCredentials());
-  stub_ = SNSService::NewStub(channel_);
+  auto server_address = hostname + ":" + std::to_string(port);
+  stub_ = SNSService::NewStub(
+      grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
   return Login();
 }
 
 SNSReply Client::processCommand(SNSCommand cmd) {
-  SNSReply reply;
   switch (cmd.first) {
     case LIST:
-      reply = List();
-      break;
+      return List();
     case FOLLOW:
       assert(cmd.second.has_value());
-      reply.first = Follow(cmd.second.value());
-      break;
+      return std::make_pair(Follow(cmd.second.value()), std::nullopt);
     case UNFOLLOW:
       assert(cmd.second.has_value());
-      reply.first = UnFollow(cmd.second.value());
-      break;
+      return std::make_pair(UnFollow(cmd.second.value()), std::nullopt);
     case TIMELINE:
-      reply.first = Timeline();
-      break;
+      return std::make_pair(Ping(), std::nullopt);
     default:
-      reply.first = FAILURE_INVALID;
-      break;
+      return std::make_pair(FAILURE_INVALID, std::nullopt);
   }
-  return reply;
 }
 
-void Client::processTimeline() { while (true); }
+void Client::processTimeline() { Timeline(); }
 
 // List Command
 SNSReply Client::List() {
-  reconnectChannel();
   SNSReply reply;
 
   ClientContext context;
@@ -127,7 +122,13 @@ SNSReply Client::List() {
 
   auto status = stub_->List(&context, request, &list_reply);
 
-  reply.first = convertGRPCStatusToSNSStatus(status);
+  using grpc::StatusCode;
+  const SNSStatusMapping mapping = {
+      // user not found
+      {StatusCode::NOT_FOUND, FAILURE_INVALID_USERNAME},
+  };
+
+  reply.first = convertGRPCStatusToSNSStatus(status, mapping);
   reply.second = std::make_unique<SNSListReply>(
       std::vector<std::string>(list_reply.all_users().begin(),
                                list_reply.all_users().end()),
@@ -137,7 +138,6 @@ SNSReply Client::List() {
 }
 
 SNSStatus Client::Follow(const std::string& username2) {
-  reconnectChannel();
   ClientContext context;
 
   FollowRequest request;
@@ -148,12 +148,24 @@ SNSStatus Client::Follow(const std::string& username2) {
 
   auto status = stub_->Follow(&context, request, &reply);
 
-  return convertGRPCStatusToSNSStatus(status);
+  using grpc::StatusCode;
+  const SNSStatusMapping mapping = {
+      {StatusCode::NOT_FOUND,
+       SNSReasons{// requesting user not found
+                  {"User not found", FAILURE_INVALID_USERNAME},
+                  // user to follow not found
+                  {"Following user not found", FAILURE_INVALID_USERNAME}}},
+      // already following
+      {StatusCode::ALREADY_EXISTS, FAILURE_ALREADY_EXISTS},
+      // cannot follow self
+      {StatusCode::INVALID_ARGUMENT, FAILURE_ALREADY_EXISTS},
+  };
+
+  return convertGRPCStatusToSNSStatus(status, mapping);
 }
 
 // UNFollow Command
 SNSStatus Client::UnFollow(const std::string& username2) {
-  reconnectChannel();
   ClientContext context;
 
   FollowRequest request;
@@ -164,7 +176,22 @@ SNSStatus Client::UnFollow(const std::string& username2) {
 
   auto status = stub_->UnFollow(&context, request, &reply);
 
-  return convertGRPCStatusToSNSStatus(status);
+  using grpc::StatusCode;
+  const SNSStatusMapping mapping = {
+      {StatusCode::NOT_FOUND,
+       SNSReasons{// requesting user not found
+                  {"User not found", FAILURE_INVALID_USERNAME},
+                  // user to follow not found
+                  {"Following user not found", FAILURE_INVALID_USERNAME},
+                  // not following
+                  {"Not following", FAILURE_NOT_A_FOLLOWER}}},
+      // already following
+      {StatusCode::ALREADY_EXISTS, FAILURE_ALREADY_EXISTS},
+      // cannot unfollow self
+      {StatusCode::INVALID_ARGUMENT, FAILURE_INVALID_USERNAME},
+  };
+
+  return convertGRPCStatusToSNSStatus(status, mapping);
 }
 
 // Login Command
@@ -172,25 +199,24 @@ SNSStatus Client::Login() {
   ClientContext context;
 
   LoginRequest request;
-  request.set_id(0);
   request.set_username(username);
 
   Empty reply;
 
   auto status = stub_->Login(&context, request, &reply);
 
-  return convertGRPCStatusToSNSStatus(status);
+  using grpc::StatusCode;
+  const SNSStatusMapping mapping = {
+      // user already logged in
+      {StatusCode::ALREADY_EXISTS, FAILURE_ALREADY_EXISTS},
+  };
+
+  return convertGRPCStatusToSNSStatus(status, mapping);
 }
 
 SNSStatus Client::Timeline() {
-  reconnectChannel();
   ClientContext context;
   context.AddMetadata("username", username);
-
-  // check channel
-  if (channel_->GetState(true) != grpc_connectivity_state::GRPC_CHANNEL_READY) {
-    return FAILURE_UNKNOWN;
-  }
 
   std::shared_ptr<ClientReaderWriter<Message, Message>> stream(
       stub_->Timeline(&context));
@@ -200,11 +226,10 @@ SNSStatus Client::Timeline() {
     return FAILURE_UNKNOWN;
   }
 
-  std::cout << "Now you are in the timeline" << std::endl;
-
   std::thread writer([this, stream]() {
     // while stream is open
-    while (stream->Write(MakeMessage(this->username, getPostMessage())));
+    while (stream->Write(MakeMessage(this->username, getPostMessage())))
+      ;
   });
 
   Message m;
@@ -217,42 +242,35 @@ SNSStatus Client::Timeline() {
   return FAILURE_UNKNOWN;
 }
 
-std::pair<std::string, uint32_t> Client::getHostnameAndPort() const {
-  auto stub = CoordService::NewStub(
-      grpc::CreateChannel(hostname + ":" + std::to_string(port),
-                          grpc::InsecureChannelCredentials()));
-
+SNSStatus Client::Ping() {
   ClientContext context;
-  ServerInfo server_info;
-  ClientID client_id;
-  client_id.set_id(user_id);
 
-  Status status = stub->GetServer(&context, client_id, &server_info);
+  Empty request;
+  Empty reply;
 
-  if (!status.ok()) {
-    std::cerr << "Failed to get server info from coordinator" << std::endl;
-    exit(1);
-  }
+  auto status = stub_->Ping(&context, request, &reply);
 
-  return std::make_pair(server_info.hostname(), server_info.port());
+  const SNSStatusMapping mapping = {};
+
+  return convertGRPCStatusToSNSStatus(status, mapping);
 }
 
 int main(int argc, char** argv) {
   std::string hostname = "localhost";
   uint32_t port = 9090;
-  uint32_t user_id = 1;
+  std::string username = "u1";
 
   int opt = 0;
-  while ((opt = getopt(argc, argv, "h:k:u:")) != -1) {
+  while ((opt = getopt(argc, argv, "h:p:u:")) != -1) {
     switch (opt) {
       case 'h':
         hostname = optarg;
         break;
-      case 'k':
+      case 'p':
         port = std::stoi(optarg);
         break;
       case 'u':
-        user_id = std::stoi(optarg);
+        username = optarg;
         break;
       default:
         std::cout << "Invalid Command Line Argument" << std::endl;
@@ -261,7 +279,7 @@ int main(int argc, char** argv) {
 
   std::cout << "Logging Initialized. Client starting...";
 
-  Client myc(user_id, hostname, port);
+  Client myc(username, hostname, port);
 
   myc.run();
 
