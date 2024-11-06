@@ -5,6 +5,7 @@
 #include <variant>
 
 #include "client.h"
+#include "coordinator.grpc.pb.h"
 #include "sns.grpc.pb.h"
 
 using namespace csce662;
@@ -56,9 +57,12 @@ SNSStatus convertGRPCStatusToSNSStatus(const Status& status,
 
 class Client : public IClient {
  public:
-  Client(const std::string& username, const std::string& hostname,
-         uint32_t port)
-      : username(username), hostname(hostname), port(port) {}
+  Client(const std::string& coordinator_hostname, uint32_t coordinator_port,
+         uint32_t user_id)
+      : username("u" + std::to_string(user_id)),
+        user_id(user_id),
+        coordinator_hostname(coordinator_hostname),
+        coordinator_port(coordinator_port) {}
 
  protected:
   virtual SNSStatus connect() override;
@@ -68,8 +72,9 @@ class Client : public IClient {
  private:
   // config data
   std::string username;
-  std::string hostname;
-  uint32_t port;
+  uint32_t user_id;
+  std::string coordinator_hostname;
+  uint32_t coordinator_port;
 
   // grpc methods
   SNSStatus Login();
@@ -84,7 +89,26 @@ class Client : public IClient {
 };
 
 SNSStatus Client::connect() {
+  auto coordinator_address =
+      coordinator_hostname + ":" + std::to_string(coordinator_port);
+  auto coordinator_stub = CoordService::NewStub(grpc::CreateChannel(
+      coordinator_address, grpc::InsecureChannelCredentials()));
+
+  ClientContext context;
+  ClientID client_id;
+  client_id.set_id(user_id);
+  ServerInfo server_info;
+
+  auto status = coordinator_stub->GetServer(&context, client_id, &server_info);
+
+  if (!status.ok()) {
+    return FAILURE_UNKNOWN;
+  }
+
+  auto& hostname = server_info.hostname();
+  auto port = server_info.port();
   auto server_address = hostname + ":" + std::to_string(port);
+
   stub_ = SNSService::NewStub(
       grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
   return Login();
@@ -256,21 +280,21 @@ SNSStatus Client::Ping() {
 }
 
 int main(int argc, char** argv) {
-  std::string hostname = "localhost";
-  uint32_t port = 3010;
-  std::string username = "u1";
+  std::string coordinator_hostname = "localhost";
+  uint32_t coordinator_port = 9090;
+  uint32_t user_id = 1;
 
   int opt = 0;
-  while ((opt = getopt(argc, argv, "h:p:u:")) != -1) {
+  while ((opt = getopt(argc, argv, "h:k:u:")) != -1) {
     switch (opt) {
       case 'h':
-        hostname = optarg;
+        coordinator_hostname = optarg;
         break;
-      case 'p':
-        port = std::stoi(optarg);
+      case 'k':
+        coordinator_port = atoi(optarg);
         break;
       case 'u':
-        username = optarg;
+        user_id = atoi(optarg);
         break;
       default:
         std::cout << "Invalid Command Line Argument" << std::endl;
@@ -279,7 +303,7 @@ int main(int argc, char** argv) {
 
   std::cout << "Logging Initialized. Client starting...";
 
-  Client myc(username, hostname, port);
+  Client myc(coordinator_hostname, coordinator_port, user_id);
 
   myc.run();
 
