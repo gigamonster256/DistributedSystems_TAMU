@@ -42,51 +42,99 @@ using grpc::Status;
 typedef uint32_t ClusterID;
 typedef uint32_t ServerID;
 
-std::unordered_map<ClusterID,
-                   std::unordered_map<ServerID, std::unique_ptr<ServerInfo>>>
-    clusters;
-std::unordered_map<ClusterID, std::unordered_map<ServerID, time_t>>
-    server_status;
+// cluster tracking information
+struct SNSClusterInfo {
+  size_t master_index;
+  std::vector<ServerInfo> servers;
+};
+
+typedef std::map<ClusterID, SNSClusterInfo> SNSClusterMap;
+
+SNSClusterMap clusters;
+
+// heartbeat tracking information
+std::map<ClusterID, std::map<ServerID, time_t>> server_status;
 
 std::time_t now() {
   return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 }
 
-const ServerInfo* get_server(uint32_t client_id) {
-  if (clusters.empty()) {
-    log(ERROR, "No servers available");
-    return nullptr;
+const ServerInfo& get_server(uint32_t client_id) {
+  // client and cluster id are 1-indexed
+  auto cluster_index = ((client_id - 1) % 3) + 1;
+  auto it = clusters.find(cluster_index);
+
+  // if the requested cluster does not exist, return the first cluster
+  if (it == clusters.end()) {
+    it = clusters.begin();
   }
-  auto& cluster = clusters[(client_id - 1) % clusters.size() + 1];
-  return cluster.begin()->second.get();  // return first server in cluster
+  auto& cluster = it->second;
+  auto& servers = cluster.servers;
+  auto& master = servers[cluster.master_index];
+  return master;
+}
+
+ClusterStatus addToSNSCluster(ClusterID cluster_id,
+                              const ServerInfo& server_info) {
+  if (clusters.find(cluster_id) == clusters.end()) {
+    log(INFO, "Creating new cluster: " + std::to_string(cluster_id));
+    log(INFO, "New Master: " + server_info.hostname() + ":" +
+                  std::to_string(server_info.port()));
+    clusters[cluster_id].master_index = 0;
+    clusters[cluster_id].servers.push_back(server_info);
+    return ClusterStatus::MASTER;
+  } else {
+    // if the server is already in the cluster, replace it
+    auto& servers = clusters[cluster_id].servers;
+    for (auto& server : servers) {
+      if (server.id() == server_info.id()) {
+        log(INFO, "Replacing server: " + server.hostname() + ":" +
+                      std::to_string(server.port()) + " with " +
+                      server_info.hostname() + ":" +
+                      std::to_string(server_info.port()));
+        server = server_info;
+        return ClusterStatus::SLAVE;
+      }
+    }
+    log(INFO, "Adding server: " + server_info.hostname() + ":" +
+                  std::to_string(server_info.port()));
+    clusters[cluster_id].servers.push_back(server_info);
+  }
+  return ClusterStatus::SLAVE;
 }
 
 class CoordServiceImpl final : public CoordService::Service {
   Status Register(ServerContext*, const ServerRegistration* registration,
-                  Empty*) override {
+                  RegistrationResponse* response) override {
+    auto cluster_id = registration->cluster_id();
     const ServerInfo& server_info = registration->info();
-    log(INFO, "Register request from " + server_info.hostname() + ":" +
-                  std::to_string(server_info.port()));
-    log(INFO, "Cluster ID: " + std::to_string(registration->cluster_id()) +
-                  " Server ID: " + std::to_string(server_info.id()));
-    // make sure server is not already registered
-    // if (clusters[registration->cluster_id()].find(server_info.id()) !=
-    //     clusters[registration->cluster_id()].end()) {
-    //   return Status(grpc::StatusCode::ALREADY_EXISTS, "Server already
-    //   exists");
-    // }
+    auto& hostname = server_info.hostname();
+    auto port = server_info.port();
+    auto server_id = server_info.id();
+    log(INFO, "Register request from " + hostname + ":" + std::to_string(port));
+    log(INFO, "Cluster ID: " + std::to_string(cluster_id) +
+                  " Server ID: " + std::to_string(server_id));
+
     // add server info to appropriate capability groups
-    clusters[registration->cluster_id()][server_info.id()] =
-        std::make_unique<ServerInfo>(server_info);
+    for (int idx = 0; idx < registration->capabilities_size(); idx++) {
+      auto capability = registration->capabilities(idx);
+      if (capability == ServerCapability::SNS) {
+        response->set_status(addToSNSCluster(cluster_id, server_info));
+      }
+    }
+
+    // count as heartbeat
+    server_status[cluster_id][server_id] = now();
     return Status::OK;
   }
 
   Status Heartbeat(ServerContext*, const HeartbeatMessage* message,
                    Empty*) override {
-    log(INFO,
-        "Heartbeat from cluster: " + std::to_string(message->cluster_id()) +
-            " server: " + std::to_string(message->server_id()));
-    server_status[message->cluster_id()][message->server_id()] = now();
+    auto cluster_id = message->cluster_id();
+    auto server_id = message->server_id();
+    log(INFO, "Heartbeat from cluster: " + std::to_string(cluster_id) +
+                  " server: " + std::to_string(server_id));
+    server_status[cluster_id][server_id] = now();
     return Status::OK;
   }
 
@@ -97,17 +145,14 @@ class CoordServiceImpl final : public CoordService::Service {
     if (clusters.empty()) {
       return Status(grpc::StatusCode::NOT_FOUND, "No servers available");
     }
-    auto* server = get_server(clientid->id());
-    if (server == nullptr) {
-      return Status(grpc::StatusCode::NOT_FOUND, "No servers available");
-    }
-    response->CopyFrom(*server);
+    auto& server = get_server(clientid->id());
+    response->CopyFrom(server);
     return Status::OK;
   }
 };
 
-void RunServer(std::string port_no) {
-  std::string server_address("127.0.0.1:" + port_no);
+void RunServer(uint32_t port_no) {
+  std::string server_address = "127.0.0.1:" + std::to_string(port_no);
   CoordServiceImpl service;
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
@@ -118,18 +163,18 @@ void RunServer(std::string port_no) {
 }
 
 int main(int argc, char** argv) {
-  std::string port = "9090";
+  uint32_t port = 9090;
   int opt = 0;
   while ((opt = getopt(argc, argv, "p:")) != -1) {
     switch (opt) {
       case 'p':
-        port = optarg;
+        port = atoi(optarg);
         break;
       default:
         std::cerr << "Invalid Command Line Argument\n";
     }
   }
-  std::string log_file_name = std::string("coordinator-") + ".log";
+  std::string log_file_name = "coordinator.log";
   google::InitGoogleLogging(log_file_name.c_str());
   RunServer(port);
   return 0;

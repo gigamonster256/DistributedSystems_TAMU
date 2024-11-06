@@ -40,5 +40,8 @@ coordinator: coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o coord
 %.pb.cc: %.proto
 	$(PROTOC) -I $(PROTOS_PATH) --cpp_out=. $<
 
-clean:
+clean: clean_db
 	rm -f *.txt *.o *.pb.cc *.pb.h tsc tsd coordinator 
+
+clean_db:
+	rm -rf server_*

@@ -16,7 +16,9 @@
 #include <mutex>
 #include <ostream>
 #include <string>
+#include <thread>
 
+#include "coordinator.grpc.pb.h"
 #include "sns.grpc.pb.h"
 
 // message serialization
@@ -37,6 +39,8 @@ using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::ServerReaderWriter;
 using grpc::Status;
+
+using grpc::ClientContext;
 
 typedef ServerReaderWriter<Message, Message> TimelineStream;
 
@@ -467,26 +471,97 @@ std::string SNSServiceImpl::user_timeline_file(const std::string& username) {
   return database_folder_path + username + ".timeline";
 }
 
-void RunServer(const std::string& server_folder, uint32_t port) {
-  std::string server_address = "0.0.0.0:" + std::to_string(port);
+void Heartbeat(std::unique_ptr<CoordService::Stub> coordinator_stub,
+               const uint32_t cluster_id, const uint32_t server_id) {
+  while (true) {
+    ClientContext context;
+    HeartbeatMessage message;
+    message.set_cluster_id(cluster_id);
+    message.set_server_id(server_id);
+    Empty response;
+    auto status = coordinator_stub->Heartbeat(&context, message, &response);
+    if (!status.ok()) {
+      log(ERROR, "Heartbeat failed");
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+  }
+}
+
+void RegisterAndHeartbeat(const std::string& coordinator_address,
+                          const uint32_t cluster_id, const uint32_t server_id,
+                          const std::string& server_address,
+                          const uint32_t port) {
+  auto coordinator_stub = CoordService::NewStub(grpc::CreateChannel(
+      coordinator_address, grpc::InsecureChannelCredentials()));
+
+  ClientContext context;
+
+  ServerRegistration registration;
+  registration.set_cluster_id(cluster_id);
+  registration.add_capabilities(ServerCapability::SNS);
+  ServerInfo* server_info = registration.mutable_info();
+  server_info->set_id(server_id);
+  server_info->set_hostname(server_address);
+  server_info->set_port(port);
+
+  RegistrationResponse response;
+
+  auto status = coordinator_stub->Register(&context, registration, &response);
+
+  if (status.ok()) {
+    log(INFO, "Registered with coordinator");
+    std::thread heartbeat_thread(Heartbeat, std::move(coordinator_stub),
+                                 cluster_id, server_id);
+    heartbeat_thread.detach();
+  } else {
+    log(ERROR, "Failed to register with coordinator");
+  }
+}
+
+void RunServer(const std::string& server_folder,
+               const std::string& coordinator_address,
+               const uint32_t cluster_id, const uint32_t server_id,
+               const uint32_t port) {
+  const std::string server_address = "127.0.0.1";
   SNSServiceImpl service(server_folder);
 
   ServerBuilder builder;
-  builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+  builder.AddListeningPort(server_address + ":" + std::to_string(port),
+                           grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   auto server = builder.BuildAndStart();
   std::cout << "Server listening on " << server_address << std::endl;
   log(INFO, "Server listening on " + server_address);
 
+  RegisterAndHeartbeat(coordinator_address, cluster_id, server_id,
+                       server_address, port);
+
   server->Wait();
 }
 
 int main(int argc, char** argv) {
+  uint32_t cluster_id = 1;
+  uint32_t server_id = 1;
+  std::string coordinator_ip = "localhost";
+  uint32_t coordinator_port = 9090;
   uint32_t port = 3010;
 
   int opt = 0;
-  while ((opt = getopt(argc, argv, "p:")) != -1) {
+  while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1) {
     switch (opt) {
+      case 'c':
+        cluster_id = std::stoi(optarg);
+        break;
+      case 's':
+        server_id = std::stoi(optarg);
+        break;
+      case 'h':
+        coordinator_ip = optarg;
+        break;
+      case 'k':
+        coordinator_port = std::stoi(optarg);
+        break;
       case 'p':
         port = std::stoi(optarg);
         break;
@@ -496,7 +571,8 @@ int main(int argc, char** argv) {
   }
 
   // create the server folder
-  std::string server_folder = "server/";
+  std::string server_folder = "server_" + std::to_string(cluster_id) + "_" +
+                              std::to_string(server_id) + "/";
   if (mkdir(server_folder.c_str(), 0777) == -1) {
     if (errno != EEXIST) {
       log(ERROR, "Failed to create server folder");
@@ -506,11 +582,14 @@ int main(int argc, char** argv) {
   }
 
   // initialize logging
-  std::string log_file_name = server_folder + "server.log";
-  google::InitGoogleLogging(log_file_name.c_str());
+  std::string log_name = "sns_server_" + std::to_string(cluster_id) + "_" +
+                         std::to_string(server_id) + ".log";
+  google::InitGoogleLogging(log_name.c_str());
   log(INFO, "Logging Initialized. Server starting...");
 
-  RunServer(server_folder, port);
+  std::string coordinator_address =
+      coordinator_ip + ":" + std::to_string(coordinator_port) + "/";
+  RunServer(server_folder, coordinator_address, cluster_id, server_id, port);
 
   return 0;
 }
