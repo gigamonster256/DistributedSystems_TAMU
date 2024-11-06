@@ -1,262 +1,186 @@
 #include <grpc++/grpc++.h>
-#include <unistd.h>
 
-#include <csignal>
-#include <iostream>
-#include <memory>
-#include <string>
 #include <thread>
-#include <vector>
 
 #include "client.h"
 #include "sns.grpc.pb.h"
-using csce662::ListReply;
-using csce662::Message;
-using csce662::Reply;
-using csce662::Request;
-using csce662::SNSService;
-using grpc::Channel;
-using grpc::ClientContext;
-using grpc::ClientReader;
-using grpc::ClientReaderWriter;
-using grpc::ClientWriter;
-using grpc::Status;
 
-void sig_ignore(int sig) { std::cout << "Signal caught " << sig; }
+using namespace csce662;
+
+using google::protobuf::Empty;
+using google::protobuf::Timestamp;
+
+using grpc::ClientContext;
+using grpc::ClientReaderWriter;
+using grpc::Status;
 
 Message MakeMessage(const std::string& username, const std::string& msg) {
   Message m;
   m.set_username(username);
   m.set_msg(msg);
-  google::protobuf::Timestamp* timestamp = new google::protobuf::Timestamp();
+  auto* timestamp = new Timestamp();
   timestamp->set_seconds(time(NULL));
   timestamp->set_nanos(0);
   m.set_allocated_timestamp(timestamp);
   return m;
 }
 
+SNSStatus convertGRPCStatusToSNSStatus(const Status& status) {
+  if (status.ok()) {
+    return SUCCESS;
+  }
+  switch (status.error_code()) {
+    case grpc::StatusCode::ALREADY_EXISTS:
+      return FAILURE_ALREADY_EXISTS;
+    case grpc::StatusCode::NOT_FOUND:
+      return FAILURE_NOT_EXISTS;
+    default:
+      return FAILURE_UNKNOWN;
+  }
+}
+
 class Client : public IClient {
  public:
-  Client(const std::string& hname, const std::string& uname,
-         const std::string& p)
-      : hostname(hname), username(uname), port(p) {}
+  Client(const std::string& username, const std::string& hostname,
+         uint32_t port)
+      : username(username), hostname(hostname), port(port) {}
 
  protected:
-  virtual int connectTo();
-  virtual IReply processCommand(std::string& input);
-  virtual void processTimeline();
+  virtual SNSStatus connect() override;
+  virtual SNSReply processCommand(SNSCommand) override;
+  virtual void processTimeline() override;
 
  private:
-  std::string hostname;
+  // config data
   std::string username;
-  std::string port;
-  std::string session_token;
+  std::string hostname;
+  uint32_t port;
 
-  IReply Login();
-  IReply List();
-  IReply Follow(const std::string& username);
-  IReply UnFollow(const std::string& username);
-  void Timeline(const std::string& username);
+  // grpc methods
+  SNSStatus Login();
+  SNSReply List();
+  SNSStatus Follow(const std::string& username);
+  SNSStatus UnFollow(const std::string& username);
+  SNSStatus Timeline();
+
+  // internal data
+  std::shared_ptr<SNSService::Stub> stub_;
 };
 
-std::unique_ptr<SNSService::Stub> stub_;
-
-///////////////////////////////////////////////////////////
-//
-//////////////////////////////////////////////////////////
-int Client::connectTo() {
-  // create stub
-  auto channel = grpc::CreateChannel(hostname + ":" + port,
-                                     grpc::InsecureChannelCredentials());
-  stub_ = SNSService::NewStub(channel);
-
-  IReply ire = Login();
-  if (!ire.grpc_status.ok() || ire.comm_status != SUCCESS) {
-    return -1;
-  }
-
-  return 0;
+SNSStatus Client::connect() {
+  auto server_address = hostname + ":" + std::to_string(port);
+  stub_ = SNSService::NewStub(
+      grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
+  return Login();
 }
 
-IReply Client::processCommand(std::string& input) {
-  std::string cmd = input;
-  // use same parsing method as getCommand to split string
-  std::size_t index = input.find_first_of(" ");
-  // FOLLOW and UNFOLLOW
-  if (index != std::string::npos) {
-    cmd = input.substr(0, index);
-    std::string argument = input.substr(index + 1, (input.length() - index));
-    if (cmd == "FOLLOW") {
-      return Follow(argument);
-    } else if (cmd == "UNFOLLOW") {
-      return UnFollow(argument);
-    }
-    IReply ire;
-    ire.comm_status = FAILURE_INVALID;
-    return ire;
+SNSReply Client::processCommand(SNSCommand cmd) {
+  switch (cmd.first) {
+    case LIST:
+      return List();
+    case FOLLOW:
+      assert(cmd.second.has_value());
+      return std::make_pair(Follow(cmd.second.value()), std::nullopt);
+    case UNFOLLOW:
+      assert(cmd.second.has_value());
+      return std::make_pair(UnFollow(cmd.second.value()), std::nullopt);
+    case TIMELINE:
+      return std::make_pair(Timeline(), std::nullopt);
+    default:
+      return std::make_pair(FAILURE_INVALID, std::nullopt);
   }
-  // LIST and TIMELINE
-  if (cmd == "LIST") {
-    return List();
-  }
-  if (cmd == "TIMELINE") {
-    // client.run() will handle this in processTimeline
-    // weird but fits the starter code
-    return IReply();
-  }
-  IReply ire;
-  ire.comm_status = FAILURE_INVALID;
-  return ire;
 }
 
-void Client::processTimeline() { Timeline(username); }
+void Client::processTimeline() {
+  while (true)
+    ;
+}
 
 // List Command
-IReply Client::List() {
-  IReply ire;
+SNSReply Client::List() {
+  SNSReply reply;
 
   ClientContext context;
 
-  Request request;
-  request.set_username(session_token);
+  ListRequest request;
+  request.set_username(username);
 
-  ListReply reply;
+  ListReply list_reply;
 
-  ire.grpc_status = stub_->List(&context, request, &reply);
+  auto status = stub_->List(&context, request, &list_reply);
 
-  if (ire.grpc_status.ok()) {
-    ire.comm_status = SUCCESS;
-    for (int i = 0; i < reply.all_users_size(); i++) {
-      ire.all_users.push_back(reply.all_users(i));
-    }
-    for (int i = 0; i < reply.followers_size(); i++) {
-      ire.followers.push_back(reply.followers(i));
-    }
-  } else {
-    ire.comm_status = FAILURE_UNKNOWN;
-  }
-
-  return ire;
+  reply.first = convertGRPCStatusToSNSStatus(status);
+  reply.second = std::make_unique<SNSListReply>(
+      std::vector<std::string>(list_reply.all_users().begin(),
+                               list_reply.all_users().end()),
+      std::vector<std::string>(list_reply.followers().begin(),
+                               list_reply.followers().end()));
+  return reply;
 }
 
-// Follow Command
-IReply Client::Follow(const std::string& username2) {
-  IReply ire;
-
+SNSStatus Client::Follow(const std::string& username2) {
   ClientContext context;
 
-  Request request;
-  request.set_username(session_token);
-  request.add_arguments(username2);
+  FollowRequest request;
+  request.set_username(username);
+  request.set_follower(username2);
 
-  Reply reply;
+  Empty reply;
 
-  ire.grpc_status = stub_->Follow(&context, request, &reply);
+  auto status = stub_->Follow(&context, request, &reply);
 
-  if (ire.grpc_status.ok()) {
-    ire.comm_status = SUCCESS;
-  } else if (ire.grpc_status.error_code() ==
-             grpc::StatusCode::INVALID_ARGUMENT) {
-    // this error could be a few different things but only following self is
-    // tested
-    ire.grpc_status = Status::OK;
-    ire.comm_status = FAILURE_ALREADY_EXISTS;
-  } else {
-    ire.grpc_status = Status::OK;
-    ire.comm_status = FAILURE_INVALID_USERNAME;
-  }
-
-  return ire;
+  return convertGRPCStatusToSNSStatus(status);
 }
 
 // UNFollow Command
-IReply Client::UnFollow(const std::string& username2) {
-  IReply ire;
-
+SNSStatus Client::UnFollow(const std::string& username2) {
   ClientContext context;
 
-  Request request;
-  request.set_username(session_token);
-  request.add_arguments(username2);
+  FollowRequest request;
+  request.set_username(username);
+  request.set_follower(username2);
 
-  Reply reply;
+  Empty reply;
 
-  ire.grpc_status = stub_->UnFollow(&context, request, &reply);
+  auto status = stub_->UnFollow(&context, request, &reply);
 
-  if (ire.grpc_status.ok()) {
-    ire.comm_status = SUCCESS;
-  } else {
-    // a bit weird but fits what client.cc is doing
-    // to print error messages
-    ire.grpc_status = Status::OK;
-    ire.comm_status = FAILURE_INVALID_USERNAME;
-  }
-
-  return ire;
+  return convertGRPCStatusToSNSStatus(status);
 }
 
 // Login Command
-IReply Client::Login() {
-  IReply ire;
-
+SNSStatus Client::Login() {
   ClientContext context;
 
-  Request request;
+  LoginRequest request;
   request.set_username(username);
 
-  Reply reply;
+  Empty reply;
 
-  ire.grpc_status = stub_->Login(&context, request, &reply);
+  auto status = stub_->Login(&context, request, &reply);
 
-  if (ire.grpc_status.ok()) {
-    ire.comm_status = SUCCESS;
-    session_token = reply.msg();
-  } else if (ire.grpc_status.error_code() == grpc::StatusCode::ALREADY_EXISTS) {
-    ire.comm_status = FAILURE_ALREADY_EXISTS;
-  } else {
-    ire.comm_status = FAILURE_UNKNOWN;
-  }
-
-  return ire;
+  return convertGRPCStatusToSNSStatus(status);
 }
 
-// Timeline Command
-void Client::Timeline(const std::string& username) {
-  // ------------------------------------------------------------
-  // In this function, you are supposed to get into timeline mode.
-  // You may need to call a service method to communicate with
-  // the server. Use getPostMessage/displayPostMessage functions
-  // in client.cc file for both getting and displaying messages
-  // in timeline mode.
-  // ------------------------------------------------------------
-
-  // ------------------------------------------------------------
-  // IMPORTANT NOTICE:
-  //
-  // Once a user enter to timeline mode , there is no way
-  // to command mode. You don't have to worry about this situation,
-  // and you can terminate the client program by pressing
-  // CTRL-C (SIGINT)
-  // ------------------------------------------------------------
-
+SNSStatus Client::Timeline() {
   ClientContext context;
-  context.AddMetadata("token", session_token);
+  context.AddMetadata("username", username);
 
   std::shared_ptr<ClientReaderWriter<Message, Message>> stream(
       stub_->Timeline(&context));
-  // check if stream is valid
+
   if (!stream) {
-    std::cout << "Failed to create stream\n";
-    return;
+    std::cerr << "Failed to write to stream" << std::endl;
+    return FAILURE_UNKNOWN;
   }
-  // thread for user input
-  std::thread writer([stream, username]() {
+
+  std::cout << "Now you are in the timeline" << std::endl;
+
+  std::thread writer([this, stream]() {
     // while stream is open
-    while (stream->Write(MakeMessage(username, getPostMessage()))) {
-    };
+    while (stream->Write(MakeMessage(this->username, getPostMessage())))
+      ;
   });
 
-  // thread for server messages
   Message m;
   while (stream->Read(&m)) {
     time_t t = m.timestamp().seconds();
@@ -264,36 +188,34 @@ void Client::Timeline(const std::string& username) {
   }
   // should never get here (no way to exit timeline mode)
   writer.join();
+  return FAILURE_UNKNOWN;
 }
 
-//////////////////////////////////////////////
-// Main Function
-/////////////////////////////////////////////
 int main(int argc, char** argv) {
   std::string hostname = "localhost";
-  std::string username = "default";
-  std::string port = "3010";
+  uint32_t port = 9090;
+  std::string username = "u1";
 
   int opt = 0;
-  while ((opt = getopt(argc, argv, "h:u:p:")) != -1) {
+  while ((opt = getopt(argc, argv, "h:p:u:")) != -1) {
     switch (opt) {
       case 'h':
         hostname = optarg;
         break;
+      case 'p':
+        port = std::stoi(optarg);
+        break;
       case 'u':
         username = optarg;
         break;
-      case 'p':
-        port = optarg;
-        break;
       default:
-        std::cout << "Invalid Command Line Argument\n";
+        std::cout << "Invalid Command Line Argument" << std::endl;
     }
   }
 
   std::cout << "Logging Initialized. Client starting...";
 
-  Client myc(hostname, username, port);
+  Client myc(username, hostname, port);
 
   myc.run();
 

@@ -2,49 +2,37 @@
 
 #include <ctime>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
 #define MAX_DATA 256
 
-enum IStatus {
+enum SNSStatus {
   SUCCESS,
   FAILURE_ALREADY_EXISTS,
   FAILURE_NOT_EXISTS,
   FAILURE_INVALID_USERNAME,
   FAILURE_NOT_A_FOLLOWER,
   FAILURE_INVALID,
-  FAILURE_UNKNOWN
+  FAILURE_UNKNOWN,
 };
 
-/*
- * IReply structure is designed to be used for displaying the
- * result of the command that has been sent to the server.
- * For example, in the "processCommand" function, you should
- * declare a variable of IReply structure and set based on
- * the type of command and the result.
- *
- * - FOLLOW/UNFOLLOW/TIMELINE command:
- * IReply ireply;
- * ireply.grpc_status = return value of a service method
- * ireply.comm_status = one of values in IStatus enum
- *
- * - LIST command:
- * IReply ireply;
- * ireply.grpc_status = return value of a service method
- * ireply.comm_status = one of values in IStatus enum
- * reply.users = list of all users who connected to the server at least onece
- * reply.followers = list of users who following current user;
- *
- * This structure is not for communicating between server and client.
- * You need to design your own rules for the communication.
- */
-struct IReply {
-  grpc::Status grpc_status;
-  enum IStatus comm_status;
-  std::vector<std::string> all_users;
-  std::vector<std::string> followers;
+enum SNSCommandType {
+  LIST,
+  FOLLOW,
+  UNFOLLOW,
+  TIMELINE,
+  INVALID,
 };
+
+typedef std::pair<SNSCommandType, std::optional<std::string>> SNSCommand;
+typedef std::pair<std::vector<std::string>, std::vector<std::string>>
+    SNSListReply;
+typedef std::pair<SNSStatus, std::optional<std::unique_ptr<SNSListReply>>>
+    SNSReply;
+
+SNSCommandType getCommandType(std::string cmd);
 
 std::string getPostMessage();
 void displayPostMessage(const std::string& sender, const std::string& message,
@@ -55,16 +43,12 @@ class IClient {
   void run();
 
  protected:
-  /*
-   * Pure virtual functions to be implemented by students
-   */
-  virtual int connectTo() = 0;
-  virtual IReply processCommand(std::string& cmd) = 0;
+  virtual SNSStatus connect() = 0;
+  virtual SNSReply processCommand(SNSCommand) = 0;
   virtual void processTimeline() = 0;
 
  private:
   void displayTitle() const;
-  std::string getCommand() const;
-  void displayCommandReply(const std::string& comm, const IReply& reply) const;
-  void toUpperCase(std::string& str) const;
+  const SNSCommand getCommand() const;
+  void displayCommandReply(SNSCommandType cmd, const SNSReply& reply) const;
 };
