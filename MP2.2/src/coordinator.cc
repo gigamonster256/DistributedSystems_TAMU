@@ -25,6 +25,7 @@
 
 #include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
+#include "proto_helpers.h"
 
 #define log(severity, msg) \
   LOG(severity) << msg;    \
@@ -39,117 +40,180 @@ using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
 
-typedef uint32_t ClusterID;
-typedef uint32_t ServerID;
+typedef int32_t ClusterID;
+typedef int32_t ServerID;
 
 // cluster tracking information
-struct SNSClusterInfo {
-  size_t master_index;
-  std::vector<ServerInfo> servers;
-};
 
+typedef struct {
+  ServerID master_id;
+  std::map<ServerID, std::pair<ServerInfo, time_t>> servers;
+} SNSClusterInfo;
 typedef std::map<ClusterID, SNSClusterInfo> SNSClusterMap;
-
-SNSClusterMap clusters;
-
-// heartbeat tracking information
-std::map<ClusterID, std::map<ServerID, time_t>> server_status;
 
 std::time_t now() {
   return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 }
 
-const ServerInfo& get_server(uint32_t client_id) {
-  // client and cluster id are 1-indexed
-  auto cluster_index = ((client_id - 1) % 3) + 1;
-  auto it = clusters.find(cluster_index);
-
-  // if the requested cluster does not exist, return the first cluster
-  if (it == clusters.end()) {
-    it = clusters.begin();
-  }
-  auto& cluster = it->second;
-  auto& servers = cluster.servers;
-  auto& master = servers[cluster.master_index];
-  return master;
-}
-
-ClusterStatus addToSNSCluster(ClusterID cluster_id,
-                              const ServerInfo& server_info) {
-  if (clusters.find(cluster_id) == clusters.end()) {
-    log(INFO, "Creating new cluster: " + std::to_string(cluster_id));
-    log(INFO, "New Master: " + server_info.hostname() + ":" +
-                  std::to_string(server_info.port()));
-    clusters[cluster_id].master_index = 0;
-    clusters[cluster_id].servers.push_back(server_info);
-    return ClusterStatus::MASTER;
-  } else {
-    // if the server is already in the cluster, replace it
-    auto& servers = clusters[cluster_id].servers;
-    for (auto& server : servers) {
-      if (server.id() == server_info.id()) {
-        log(INFO, "Replacing server: " + server.hostname() + ":" +
-                      std::to_string(server.port()) + " with " +
-                      server_info.hostname() + ":" +
-                      std::to_string(server_info.port()));
-        server = server_info;
-        return ClusterStatus::SLAVE;
-      }
-    }
-    log(INFO, "Adding server: " + server_info.hostname() + ":" +
-                  std::to_string(server_info.port()));
-    clusters[cluster_id].servers.push_back(server_info);
-  }
-  return ClusterStatus::SLAVE;
-}
-
 class CoordServiceImpl final : public CoordService::Service {
   Status Register(ServerContext*, const ServerRegistration* registration,
-                  RegistrationResponse* response) override {
-    auto cluster_id = registration->cluster_id();
-    const ServerInfo& server_info = registration->info();
-    auto& hostname = server_info.hostname();
-    auto port = server_info.port();
-    auto server_id = server_info.id();
-    log(INFO, "Register request from " + hostname + ":" + std::to_string(port));
-    log(INFO, "Cluster ID: " + std::to_string(cluster_id) +
-                  " Server ID: " + std::to_string(server_id));
-
-    // add server info to appropriate capability groups
-    for (int idx = 0; idx < registration->capabilities_size(); idx++) {
-      auto capability = registration->capabilities(idx);
-      if (capability == ServerCapability::SNS) {
-        response->set_status(addToSNSCluster(cluster_id, server_info));
-      }
-    }
-
-    // count as heartbeat
-    server_status[cluster_id][server_id] = now();
-    return Status::OK;
-  }
+                  RegistrationResponse* response) override;
 
   Status Heartbeat(ServerContext*, const HeartbeatMessage* message,
-                   Empty*) override {
-    auto cluster_id = message->cluster_id();
-    auto server_id = message->server_id();
-    log(INFO, "Heartbeat from cluster: " + std::to_string(cluster_id) +
-                  " server: " + std::to_string(server_id));
-    server_status[cluster_id][server_id] = now();
-    return Status::OK;
-  }
+                   Empty*) override;
 
   Status GetServer(ServerContext*, const ClientID* clientid,
-                   ServerInfo* response) override {
-    log(INFO,
-        "GetServer request from client id: " + std::to_string(clientid->id()));
-    if (clusters.empty()) {
-      return Status(grpc::StatusCode::NOT_FOUND, "No servers available");
-    }
-    auto& server = get_server(clientid->id());
-    response->CopyFrom(server);
-    return Status::OK;
-  }
+                   ServerInfo* response) override;
+
+ private:
+  SNSClusterMap clusters;
+
+  const ServerInfo& get_server(const int32_t client_id) const;
+  const ServerInfo& getMaster(const ClusterID cluster_id) const;
+  bool is_master(const ClusterID cluster_id, const ServerID server_id) const;
+  ClusterStatus addToSNSCluster(ClusterID cluster_id,
+                                const ServerInfo& server_info);
+  time_t get_last_heartbeat(const ClusterID cluster_id,
+                            const ServerID server_id) const;
+  void informNewSlave(const ClusterID cluster_id,
+                      const ServerInfo& server_info);
 };
+
+Status CoordServiceImpl::Register(ServerContext*,
+                                  const ServerRegistration* registration,
+                                  RegistrationResponse* response) {
+  const auto cluster_id = registration->cluster_id();
+  const ServerInfo& server_info = registration->info();
+  const auto [hostname, port] = get_server_address(server_info);
+  const auto server_id = server_info.id();
+
+  const auto server_address = hostname + ":" + std::to_string(port);
+
+  log(INFO, "Register request from " + server_address);
+  log(INFO, "Cluster ID: " + std::to_string(cluster_id) +
+                " Server ID: " + std::to_string(server_id));
+
+  // add server info to appropriate capability groups
+  for (int idx = 0; idx < registration->capabilities_size(); idx++) {
+    const auto capability = registration->capabilities(idx);
+    if (capability == ServerCapability::SNS) {
+      // add to cluster
+      const auto status = addToSNSCluster(cluster_id, server_info);
+      response->set_status(status);
+
+      // inform the master of the new slave
+      if (status == ClusterStatus::SLAVE) {
+        informNewSlave(cluster_id, server_info);
+      }
+    }
+  }
+  return Status::OK;
+}
+
+Status CoordServiceImpl::Heartbeat(ServerContext*,
+                                   const HeartbeatMessage* message, Empty*) {
+  const auto cluster_id = message->cluster_id();
+  const auto server_id = message->server_id();
+  log(INFO, "Heartbeat from cluster: " + std::to_string(cluster_id) +
+                " server: " + std::to_string(server_id));
+  clusters[cluster_id].servers[server_id].second = now();
+  return Status::OK;
+}
+
+Status CoordServiceImpl::GetServer(ServerContext*, const ClientID* clientid,
+                                   ServerInfo* response) {
+  log(INFO,
+      "GetServer request from client id: " + std::to_string(clientid->id()));
+  if (clusters.empty()) {
+    return Status(grpc::StatusCode::NOT_FOUND, "No servers available");
+  }
+  auto& server = get_server(clientid->id());
+  response->CopyFrom(server);
+  return Status::OK;
+}
+
+const ServerInfo& CoordServiceImpl::get_server(const int32_t client_id) const {
+  // client and cluster id are 1-indexed
+  auto cluster_index = (client_id - 1) % 3 + 1;
+
+  return getMaster(cluster_index);
+}
+
+const ServerInfo& CoordServiceImpl::getMaster(
+    const ClusterID cluster_id) const {
+  auto it = clusters.find(cluster_id);
+
+  // if cluster not found, throw exception
+  if (it == clusters.end()) {
+    throw std::runtime_error("Cluster not found");
+  }
+  const auto master_id = it->second.master_id;
+  return it->second.servers.at(master_id).first;
+}
+
+bool CoordServiceImpl::is_master(const ClusterID cluster_id,
+                                 const ServerID server_id) const {
+  const auto it = clusters.find(cluster_id);
+  if (it == clusters.end()) {
+    return false;
+  }
+  return it->second.master_id == server_id;
+}
+
+ClusterStatus CoordServiceImpl::addToSNSCluster(ClusterID cluster_id,
+                                                const ServerInfo& server_info) {
+  const auto [hostname, port] = get_server_address(server_info);
+  const auto server_id = server_info.id();
+  const auto server_address = hostname + ":" + std::to_string(port);
+  log(INFO, "Register request from " + server_address);
+
+  auto it = clusters.find(cluster_id);
+
+  // new cluster
+  if (it == clusters.end()) {
+    it = clusters.insert({cluster_id, SNSClusterInfo()}).first;
+  }
+
+  auto& cluster = it->second;
+
+  // new master
+  if (cluster.servers.empty()) {
+    cluster.master_id = server_id;
+  }
+
+  cluster.servers[server_id] = {server_info, now()};
+
+  const auto is_master = server_id == cluster.master_id;
+
+  return is_master ? ClusterStatus::MASTER : ClusterStatus::SLAVE;
+}
+
+time_t CoordServiceImpl::get_last_heartbeat(const ClusterID cluster_id,
+                                            const ServerID server_id) const {
+  const auto it = clusters.find(cluster_id);
+  if (it == clusters.end()) {
+    return 0;
+  }
+  const auto& cluster = it->second;
+  const auto server_it = cluster.servers.find(server_id);
+  if (server_it == cluster.servers.end()) {
+    return 0;
+  }
+  return server_it->second.second;
+}
+
+void CoordServiceImpl::informNewSlave(const ClusterID cluster_id,
+                                      const ServerInfo& server_info) {
+  // get the master for the cluster
+  const auto& master = getMaster(cluster_id);
+
+  // inform the master of the new slave
+  auto [hostname, port] = get_server_address(master);
+  auto master_address = hostname + ":" + std::to_string(port);
+
+  auto stub = ReplicatorService::NewStub(
+      grpc::CreateChannel(master_address, grpc::InsecureChannelCredentials()));
+}
 
 void RunServer(uint32_t port_no) {
   std::string server_address = "127.0.0.1:" + std::to_string(port_no);

@@ -1,0 +1,11 @@
+syntax = "proto3";
+package csce662;
+
+message KnownUsers {
+  repeated string usernames = 1;
+}
+
+message Followers {
+  string username = 1;
+  repeated string followers = 2;
+}

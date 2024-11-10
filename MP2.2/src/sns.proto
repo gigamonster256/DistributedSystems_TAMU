@@ -10,6 +10,7 @@ service SNSService {
   rpc UnFollow(FollowRequest) returns (google.protobuf.Empty) {}
   rpc Timeline(stream Message) returns (stream Message) {}
   rpc Ping(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+  rpc Post(Message) returns (google.protobuf.Empty) {}
 }
 
 message ListRequest {

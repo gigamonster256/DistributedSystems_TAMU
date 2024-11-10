@@ -7,6 +7,7 @@
 
 #include "client.h"
 #include "coordinator.grpc.pb.h"
+#include "proto_helpers.h"
 #include "sns.grpc.pb.h"
 
 using namespace csce662;
@@ -106,8 +107,7 @@ SNSStatus Client::connect() {
     return FAILURE_UNKNOWN;
   }
 
-  auto& hostname = server_info.hostname();
-  auto port = server_info.port();
+  auto [hostname, port] = get_server_address(server_info);
   auto server_address = hostname + ":" + std::to_string(port);
 
   stub_ = SNSService::NewStub(

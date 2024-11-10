@@ -19,6 +19,8 @@
 #include <thread>
 
 #include "coordinator.grpc.pb.h"
+#include "exclusive_fs.h"
+#include "proto_helpers.h"
 #include "sns.grpc.pb.h"
 
 // message serialization
@@ -44,6 +46,8 @@ using grpc::ClientContext;
 
 typedef ServerReaderWriter<Message, Message> TimelineStream;
 
+typedef std::vector<std::unique_ptr<SNSService::Stub>> SlaveStubList;
+
 std::ostream& operator<<(std::ostream&, const Message&);
 std::istream& operator>>(std::istream&, Message&);
 
@@ -58,13 +62,14 @@ struct User {
   User(std::string name) : username(name), logged_in(false) {}
 };
 
+SlaveStubList slaveStubs;
+
 class SNSServiceImpl final : public SNSService::Service {
   // config data
   std::string database_folder_path;
 
   // runtime data
   std::unordered_map<std::string, User*> user_db;
-  std::mutex db_mtx;
 
   // helper functions
   std::string user_database_file();
@@ -89,6 +94,25 @@ class SNSServiceImpl final : public SNSService::Service {
     load_user_db();
   }
 };
+
+class SNSReplicatorServiceImpl final : public ReplicatorService::Service {
+  Status InformNewSlave(ServerContext*, const ServerInfo* request,
+                        Empty* response) override;
+};
+
+Status SNSReplicatorServiceImpl::InformNewSlave(ServerContext*,
+                                                const ServerInfo* request,
+                                                Empty*) {
+  auto [hostname, port] = get_server_address(*request);
+  auto server_address = hostname + ":" + std::to_string(port);
+  log(INFO, "InformNewSlave: " + server_address);
+
+  // create a stub for the new slave
+  auto stub = SNSService::NewStub(
+      grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
+  slaveStubs.push_back(std::move(stub));
+  return Status::OK;
+}
 
 Status SNSServiceImpl::List(ServerContext*, const ListRequest* request,
                             ListReply* list_reply) {
@@ -154,14 +178,22 @@ Status SNSServiceImpl::Follow(ServerContext*, const FollowRequest* request,
   }
 
   // save following to file
-  std::lock_guard<std::mutex> lock(following_user->mtx);
-  auto filename = user_following_file(following_user->username);
-  std::ofstream file(filename);
-  if (file.is_open()) {
+  {
+    auto filename = user_following_file(following_user->username);
+    ExclusiveOutputFileStream file(filename);
     for (auto& username : following_user->following) {
       file << username << std::endl;
     }
-    file.close();
+  }
+
+  // replicate to slaves
+  for (auto& stub : slaveStubs) {
+    Empty response;
+    ClientContext context;
+    auto status = stub->Follow(&context, *request, &response);
+    if (!status.ok()) {
+      log(ERROR, "Follow: Slave failed to replicate");
+    }
   }
 
   return Status::OK;
@@ -229,37 +261,29 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
 
   // save following to file
   {
-    std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
     auto filename = user_following_file(unfollowing_user->username);
-    std::ofstream file(filename);
-    if (file.is_open()) {
-      for (auto& username : unfollowing_user->following) {
-        file << username << std::endl;
-      }
-      file.close();
+    ExclusiveOutputFileStream file(filename);
+    for (auto& username : unfollowing_user->following) {
+      file << username << std::endl;
     }
   }
 
   // clear timeline of posts
   {
-    std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
     std::vector<Message> messages;
     auto filename = user_timeline_file(unfollowing_user->username);
-    std::ifstream old_file(filename);
-    if (old_file.is_open()) {
-      Message message;
-      while (true) {
-        old_file >> message;
-        std::string line;
-        std::getline(old_file, line);
-        if (old_file.eof()) {
-          break;
-        }
-        if (message.username() != being_unfollowed_username) {
-          messages.push_back(message);
-        }
+    ExclusiveInputFileStream old_file(filename);
+    Message message;
+    while (true) {
+      old_file >> message;
+      std::string line;
+      std::getline(old_file, line);
+      if (old_file.eof()) {
+        break;
       }
-      old_file.close();
+      if (message.username() != being_unfollowed_username) {
+        messages.push_back(message);
+      }
     }
 
     // garbage collect
@@ -268,12 +292,21 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
     }
 
     // save to file
-    auto new_file = std::ofstream(filename);
-    if (new_file.is_open()) {
+    {
+      ExclusiveOutputFileStream new_file(filename);
       for (auto& message : messages) {
         new_file << message << std::endl;
       }
-      new_file.close();
+    }
+  }
+
+  // replicate to slaves
+  for (auto& stub : slaveStubs) {
+    Empty response;
+    ClientContext context;
+    auto status = stub->UnFollow(&context, *request, &response);
+    if (!status.ok()) {
+      log(ERROR, "UnFollow: Slave failed to replicate");
     }
   }
 
@@ -288,18 +321,14 @@ Status SNSServiceImpl::Login(ServerContext*, const LoginRequest* request,
   // get/create user
   User* user = nullptr;
   {
-    std::lock_guard<std::mutex> lock(db_mtx);
     user = user_db[username];
     if (user == nullptr) {
       log(INFO, "New user " + username);
       user = user_db[username] = new User(username);
       // populate
       auto filename = user_database_file();
-      std::ofstream file(filename, std::ios::app);
-      if (file.is_open()) {
-        file << username << std::endl;
-        file.close();
-      }
+      ExclusiveOutputFileStream file(filename, std::ios::app);
+      file << username << std::endl;
     }
   }
   // check if user is already logged in
@@ -396,6 +425,17 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
         file.close();
       }
     }
+
+    // forward to slave servers
+    for (auto& stub : slaveStubs) {
+      Empty response;
+      ClientContext context;
+      auto status = stub->Post(&context, message, &response);
+      if (!status.ok()) {
+        log(ERROR, "Timeline: Slave failed to replicate");
+      }
+    }
+
     for (auto& follower : user->followers) {
       if (user_db[follower] == nullptr) {
         log(ERROR, "Timeline: Follower " + follower + " not found");
@@ -426,35 +466,31 @@ Status SNSServiceImpl::Ping(ServerContext*, const Empty*, Empty*) {
 }
 
 void SNSServiceImpl::load_user_db() {
-  auto userfile = user_database_file();
-  std::ifstream file(userfile);
-  if (file.is_open()) {
+  {
+    auto userfile = user_database_file();
+    ExclusiveInputFileStream file(userfile);
     std::string username;
     while (std::getline(file, username)) {
       user_db[username] = new User(username);
     }
-    file.close();
   }
   // populate following
   for (auto& [username, user] : user_db) {
     auto followingfile = user_following_file(username);
-    std::ifstream file(followingfile);
-    if (file.is_open()) {
-      std::string followed_username;
-      while (std::getline(file, followed_username)) {
-        if (followed_username != "") {
-          User* followed_user = user_db[followed_username];
-          if (followed_user != nullptr) {
-            user->following.push_back(followed_username);
-            followed_user->followers.push_back(username);
-          } else {
-            log(ERROR, "Database: user " << username << " following "
-                                         << followed_username
-                                         << " who is not in database");
-          }
+    ExclusiveInputFileStream file(followingfile);
+    std::string followed_username;
+    while (std::getline(file, followed_username)) {
+      if (followed_username != "") {
+        User* followed_user = user_db[followed_username];
+        if (followed_user != nullptr) {
+          user->following.push_back(followed_username);
+          followed_user->followers.push_back(username);
+        } else {
+          log(ERROR, "Database: user " << username << " following "
+                                       << followed_username
+                                       << " who is not in database");
         }
       }
-      file.close();
     }
   }
 }
@@ -499,7 +535,9 @@ void RegisterAndHeartbeat(const std::string& coordinator_address,
 
   ServerRegistration registration;
   registration.set_cluster_id(cluster_id);
+  // we do SNS and SNS_REPLICATOR
   registration.add_capabilities(ServerCapability::SNS);
+  registration.add_capabilities(ServerCapability::SNS_REPLICATOR);
   ServerInfo* server_info = registration.mutable_info();
   server_info->set_id(server_id);
   server_info->set_hostname(server_address);
@@ -525,11 +563,13 @@ void RunServer(const std::string& server_folder,
                const uint32_t port) {
   const std::string server_address = "127.0.0.1";
   SNSServiceImpl service(server_folder);
+  SNSReplicatorServiceImpl replicator;
 
   ServerBuilder builder;
   builder.AddListeningPort(server_address + ":" + std::to_string(port),
                            grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
+  builder.RegisterService(&replicator);
   auto server = builder.BuildAndStart();
   std::cout << "Server listening on " << server_address << std::endl;
   log(INFO, "Server listening on " + server_address);

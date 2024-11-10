@@ -8,12 +8,22 @@ service CoordService {
   rpc GetServer(ClientID) returns (ServerInfo) {}
 }
 
+service ReplicatorService {
+  rpc InformNewSlave(ServerInfo) returns (google.protobuf.Empty) {}
+}
+
+// service SynchronizerService {
+
+// }
+
 message ClientID {
   int32 id = 1;
 }
 
 enum ServerCapability {
   SNS = 0;
+  SNS_REPLICATOR = 1;
+  SNS_SYNCHRONIZER = 2;
 }
 
 enum ClusterStatus {
