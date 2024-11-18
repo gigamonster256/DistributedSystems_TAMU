@@ -39,6 +39,7 @@
             {
               languages.cplusplus.enable = true;
               languages.java.enable = true;
+              languages.python.enable = true;
               services.rabbitmq = {
                 enable = true;
                 managementPlugin.enable = true;
@@ -61,7 +62,10 @@
                 # java stuff
                 hadoop
               ];
-              env.GLOG_logtostderr = "1";
+              env = {
+                GLOG_logtostderr = "1";
+                HADOOP_CLIENT_OPTS = "-ea";
+              };
             }
           ];
         };

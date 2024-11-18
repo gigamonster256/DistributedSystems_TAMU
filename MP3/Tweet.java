@@ -1,32 +1,41 @@
-import org.apache.hadoop.io.LongWritable;
-import org.apache.hadoop.io.Text;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 
 public class Tweet {
-  private LongWritable datetime;
-  private Text user;
-  private Text title;
-  private Text content;
+  private static final String DATE_TIME_FORMAT = "yyyy-MM-dd HH:mm:ss";
+  private static final DateTimeFormatter DATE_TIME_FORMATTER =
+      DateTimeFormatter.ofPattern(DATE_TIME_FORMAT);
 
-  public Tweet(LongWritable datetime, Text user, Text title, Text content) {
-    this.datetime = datetime;
-    this.user = user;
-    this.title = title;
+  private LocalDateTime datetime;
+  private String username;
+  private String content;
+
+  public Tweet(String datetime, String username, String content) {
+    try {
+      this.datetime = LocalDateTime.parse(datetime, DATE_TIME_FORMATTER);
+    } catch (DateTimeParseException e) {
+      System.err.println("Invalid datetime format: " + datetime);
+      System.exit(1);
+    }
+    this.username = username;
     this.content = content;
   }
 
-  public LongWritable getDatetime() {
+  public LocalDateTime getDateTime() {
     return datetime;
   }
 
-  public Text getUser() {
-    return user;
+  public String getUsername() {
+    return username;
   }
 
-  public Text getTitle() {
-    return title;
-  }
-
-  public Text getContent() {
+  public String getContent() {
     return content;
+  }
+
+  @Override
+  public String toString() {
+    return datetime + "\n" + username + "\n" + content;
   }
 }
