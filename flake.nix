@@ -38,6 +38,7 @@
           modules = [
             {
               languages.cplusplus.enable = true;
+              languages.java.enable = true;
               services.rabbitmq = {
                 enable = true;
                 managementPlugin.enable = true;
@@ -48,6 +49,7 @@
                 clang-format.enable = true;
               };
               packages = with pkgs; [
+                # C++
                 grpc
                 glog
                 protobuf
@@ -55,6 +57,9 @@
                 pkg-config
                 rabbitmq-c
                 jsoncpp
+
+                # java stuff
+                hadoop
               ];
               env.GLOG_logtostderr = "1";
             }
