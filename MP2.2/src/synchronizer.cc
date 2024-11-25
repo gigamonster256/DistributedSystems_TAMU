@@ -377,6 +377,7 @@ void RunServer(const std::string &server_folder,
   SyncServiceImpl service;
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+  builder.RegisterService(&service);
   auto server(builder.BuildAndStart());
 
   // Initialize RabbitMQ connection

@@ -291,12 +291,17 @@ void CoordServiceImpl::notifyNewMasterSyncronizer(int cluster_id) {
       master_sync_address, grpc::InsecureChannelCredentials()));
 
   // send the SetMaster rpc
+  ClientContext context;
   Empty response;
   Empty request;
-  ClientContext context;
+
   auto status = stub->SetMaster(&context, request, &response);
   if (!status.ok()) {
     log(ERROR, "SetMaster: Failed to inform master syncronizer of new master");
+    log(ERROR, status.error_message());
+    log(ERROR, status.error_code());
+  } else {
+    log(INFO, "Notified backup master syncronizer");
   }
 }
 
