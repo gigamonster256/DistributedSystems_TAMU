@@ -1,14 +1,30 @@
 #pragma once
 
 #include <fcntl.h>
+#include <google/protobuf/timestamp.pb.h>
 #include <sys/file.h>
 #include <unistd.h>
 
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "sns.pb.h"
+
+// message serialization
+#define SNS_MESSAGE_TIME_FORMAT "%F %T"
+#define USERNAME_PREFIX "http://twitter.com/"
+
+std::ostream& operator<<(std::ostream&, const csce662::Message&);
+std::istream& operator>>(std::istream&, csce662::Message&);
+
+namespace csce662 {
 
 class FileOutputBuffer : public std::streambuf {
  public:
@@ -121,3 +137,65 @@ class ExclusiveInputFileStream : public std::istream {
   FILE* file_;
   FileInputBuffer* buffer_;
 };
+
+class SNSDatabase;
+
+class SNSUser {
+ private:
+  std::string username_;
+  SNSDatabase* db_;
+
+ public:
+  SNSUser(const std::string& username, SNSDatabase* db)
+      : username_(username), db_(db) {}
+  // get the username of the user
+  std::string get_username() const;
+  // add a follower to the user
+  void add_follower(const std::string& follower);
+  // remove a follower from the user
+  void remove_follower(const std::string& follower);
+  // who the user is following
+  std::vector<std::string> get_following() const;
+  // who is following the user
+  std::vector<std::string> get_followers() const;
+  // get timeline of the user
+  std::vector<Message> get_timeline() const;
+  // post a message to the user's timeline
+  // and the timeline of the user's followers
+  void post(const Message& message);
+};
+
+class SNSDatabase {
+ private:
+  std::string folder_path_;
+
+ public:
+  SNSDatabase(const std::string& folder_path) : folder_path_(folder_path) {}
+  void create_user_if_not_exists(const std::string& username);
+  std::vector<std::string> get_all_usernames() const;
+  std::optional<SNSUser> get_user(const std::string& username);
+  std::optional<SNSUser> operator[](const std::string& username) {
+    return get_user(username);
+  }
+
+ private:
+  std::string user_database_file() const;
+  std::string user_following_file(const std::string& username) const;
+  std::string user_followers_file(const std::string& username) const;
+  std::string user_timeline_file(const std::string& username) const;
+  void create_user(const std::string& username);
+  void add_follower(const std::string& username, const std::string& follower);
+  void remove_follower(const std::string& username,
+                       const std::string& follower);
+  std::vector<std::string> get_following(const std::string& username) const;
+  std::vector<std::string> get_followers(const std::string& username) const;
+  std::vector<Message> get_timeline(const std::string& username) const;
+  void post_to_timeline(const std::string& username, const Message& message);
+  void post_to_self_and_followers(const std::string& username,
+                                  const Message& message);
+  void ensure_file_exists(const std::string& filename) const;
+
+  friend class SNSUser;
+};
+
+}  // namespace csce662

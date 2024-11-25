@@ -28,7 +28,7 @@ all: tsc tsd coordinator synchronizer
 tsc: client.o coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o tsc.o
 	$(CXX) $^ $(LDFLAGS) -g -o $@
 
-tsd: coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o tsd.o
+tsd: coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o tsd.o sns_db.o
 	$(CXX) $^ $(LDFLAGS) -g -o $@
 
 coordinator: coordinator.pb.o coordinator.grpc.pb.o coordinator.o

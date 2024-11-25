@@ -14,18 +14,15 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <thread>
 
 #include "coordinator.grpc.pb.h"
-#include "exclusive_fs.h"
 #include "proto_helpers.h"
 #include "sns.grpc.pb.h"
-
-// message serialization
-#define SNS_MESSAGE_TIME_FORMAT "%F %T"
-#define USERNAME_PREFIX "http://twitter.com/"
+#include "sns_db.h"
 
 #define log(severity, msg) \
   LOG(severity) << msg;    \
@@ -48,34 +45,13 @@ typedef ServerReaderWriter<Message, Message> TimelineStream;
 
 typedef std::vector<std::unique_ptr<SNSService::Stub>> SlaveStubList;
 
-std::ostream& operator<<(std::ostream&, const Message&);
-std::istream& operator>>(std::istream&, Message&);
-
-struct User {
-  std::string username;
-  std::mutex mtx;
-  std::vector<std::string> followers;
-  std::vector<std::string> following;
-  TimelineStream* stream = nullptr;
-  bool logged_in;
-  bool operator==(const User& c1) const { return (username == c1.username); }
-  User(std::string name) : username(name), logged_in(false) {}
-};
-
 SlaveStubList slaveStubs;
 
 class SNSServiceImpl final : public SNSService::Service {
-  // config data
-  std::string database_folder_path;
-
-  // runtime data
-  std::unordered_map<std::string, User*> user_db;
-
-  // helper functions
-  std::string user_database_file();
-  void load_user_db();
-  std::string user_following_file(const std::string& username);
-  std::string user_timeline_file(const std::string& username);
+ private:
+  SNSDatabase user_db;
+  std::set<std::string> logged_in_users;
+  std::unordered_map<std::string, TimelineStream*> timeline_streams;
 
   // service methods
   Status Login(ServerContext*, const LoginRequest* request,
@@ -92,10 +68,7 @@ class SNSServiceImpl final : public SNSService::Service {
   Status Post(ServerContext*, const Message* request, Empty* response) override;
 
  public:
-  SNSServiceImpl(const std::string& server_folder)
-      : database_folder_path(server_folder) {
-    load_user_db();
-  }
+  SNSServiceImpl(const std::string& server_folder) : user_db(server_folder) {}
 };
 
 class SNSReplicatorServiceImpl final : public ReplicatorService::Service {
@@ -119,17 +92,21 @@ Status SNSReplicatorServiceImpl::InformNewSlave(ServerContext*,
 
 Status SNSServiceImpl::List(ServerContext*, const ListRequest* request,
                             ListReply* list_reply) {
-  User* user = user_db[request->username()];
-  if (user == nullptr) {
+  auto username = request->username();
+  auto user_opt = user_db[username];
+  // user not found
+  if (user_opt == std::nullopt) {
     log(ERROR, "List: User not found");
     return Status(grpc::StatusCode::NOT_FOUND, "User not found");
   }
-  log(INFO, "List request from " + user->username);
-  for (auto& [username, user] : user_db) {
-    if (user == nullptr) continue;
-    list_reply->add_all_users(username);
+  auto& user = user_opt.value();
+  log(INFO, "List request from " + user.get_username());
+  auto all_users = user_db.get_all_usernames();
+  for (auto& user : all_users) {
+    list_reply->add_all_users(user);
   }
-  for (auto& username : user->followers) {
+  auto following = user.get_following();
+  for (auto& username : following) {
     list_reply->add_followers(username);
   }
   return Status::OK;
@@ -137,57 +114,41 @@ Status SNSServiceImpl::List(ServerContext*, const ListRequest* request,
 
 Status SNSServiceImpl::Follow(ServerContext*, const FollowRequest* request,
                               Empty*) {
-  auto following_user = user_db[request->username()];
-  if (following_user == nullptr) {
+  const auto& username = request->username();
+  auto following_user_opt = user_db[username];
+  if (following_user_opt == std::nullopt) {
     log(ERROR, "Follow: User not found");
     return Status(grpc::StatusCode::NOT_FOUND, "User not found");
   }
-  log(INFO, "Follow request from " + following_user->username);
+  auto following_user = following_user_opt.value();
+  log(INFO, "Follow request from " + following_user.get_username());
 
   const auto& being_followed_username = request->follower();
 
-  log(INFO, "User " + following_user->username + " following " +
-                being_followed_username);
+  log(INFO, "User " + username + " following " + being_followed_username);
 
   // make sure not following self
-  if (following_user->username == being_followed_username) {
+  if (username == being_followed_username) {
     log(ERROR, "Follow: Cannot follow self");
     return Status(grpc::StatusCode::INVALID_ARGUMENT, "Cannot follow self");
   }
 
-  // get the client that is being followed
-  auto being_followed_client = user_db[being_followed_username];
-  if (being_followed_client == nullptr) {
-    log(ERROR, "Follow: User not found");
-    return Status(grpc::StatusCode::NOT_FOUND, "Following user not found");
-  }
-
   // make sure not already following
-  for (auto& already_followed_user : following_user->following) {
-    if (already_followed_user == being_followed_username) {
+  for (auto& already_followed_username : following_user.get_following()) {
+    if (already_followed_username == being_followed_username) {
       log(ERROR, "Follow: Already following");
       return Status(grpc::StatusCode::ALREADY_EXISTS, "Already following");
     }
   }
 
-  // add to following lists
-  {
-    std::lock_guard<std::mutex> lock(following_user->mtx);
-    following_user->following.push_back(being_followed_username);
-  }
-  {
-    std::lock_guard<std::mutex> lock(being_followed_client->mtx);
-    being_followed_client->followers.push_back(following_user->username);
+  // get the client that is being followed
+  const auto being_followed_user_opt = user_db[being_followed_username];
+  if (being_followed_user_opt == std::nullopt) {
+    log(ERROR, "Follow: User not found");
+    return Status(grpc::StatusCode::NOT_FOUND, "Following user not found");
   }
 
-  // save following to file
-  {
-    auto filename = user_following_file(following_user->username);
-    ExclusiveOutputFileStream file(filename);
-    for (auto& username : following_user->following) {
-      file << username << std::endl;
-    }
-  }
+  following_user.add_follower(being_followed_username);
 
   // replicate to slaves
   for (auto& stub : slaveStubs) {
@@ -204,32 +165,27 @@ Status SNSServiceImpl::Follow(ServerContext*, const FollowRequest* request,
 
 Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
                                 Empty*) {
-  auto unfollowing_user = user_db[request->username()];
-  if (unfollowing_user == nullptr) {
+  const auto& username = request->username();
+  auto unfollowing_user_opt = user_db[username];
+  if (unfollowing_user_opt == std::nullopt) {
     log(ERROR, "UnFollow: User not found");
     return Status(grpc::StatusCode::NOT_FOUND, "User not found");
   }
-  log(INFO, "Unfollow request from " + unfollowing_user->username);
+  auto unfollowing_user = unfollowing_user_opt.value();
+  log(INFO, "Unfollow request from " + unfollowing_user.get_username());
 
   // get the user that this user wants to unfollow
   const auto& being_unfollowed_username = request->follower();
 
   // make sure not unfollowing self
-  if (unfollowing_user->username == being_unfollowed_username) {
+  if (username == being_unfollowed_username) {
     log(ERROR, "UnFollow: Cannot unfollow self");
     return Status(grpc::StatusCode::INVALID_ARGUMENT, "Cannot unfollow self");
   }
 
-  // get the client that is being unfollowed
-  auto being_unfollowed_user = user_db[being_unfollowed_username];
-  if (being_unfollowed_user == nullptr) {
-    log(ERROR, "UnFollow: User not found");
-    return Status(grpc::StatusCode::NOT_FOUND, "Following user not found");
-  }
-
   // make sure already following
   bool found = false;
-  for (auto& username : unfollowing_user->following) {
+  for (auto& username : unfollowing_user.get_following()) {
     if (username == being_unfollowed_username) {
       found = true;
       break;
@@ -240,74 +196,14 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
     return Status(grpc::StatusCode::NOT_FOUND, "Not following");
   }
 
-  // remove from following lists
-  {
-    std::lock_guard<std::mutex> lock(unfollowing_user->mtx);
-    for (auto it = unfollowing_user->following.begin();
-         it != unfollowing_user->following.end(); it++) {
-      if (*it == being_unfollowed_username) {
-        unfollowing_user->following.erase(it);
-        break;
-      }
-    }
-  }
-  {
-    std::lock_guard<std::mutex> lock(being_unfollowed_user->mtx);
-    for (auto it = being_unfollowed_user->followers.begin();
-         it != being_unfollowed_user->followers.end(); it++) {
-      if (*it == unfollowing_user->username) {
-        being_unfollowed_user->followers.erase(it);
-        break;
-      }
-    }
+  // get the client that is being unfollowed
+  const auto being_unfollowed_user_opt = user_db[being_unfollowed_username];
+  if (being_unfollowed_user_opt == std::nullopt) {
+    log(ERROR, "UnFollow: User not found");
+    return Status(grpc::StatusCode::NOT_FOUND, "Following user not found");
   }
 
-  // save following to file (overwrite)
-  try {
-    auto filename = user_following_file(unfollowing_user->username);
-    ExclusiveOutputFileStream file(filename);
-    for (auto& username : unfollowing_user->following) {
-      file << username << std::endl;
-    }
-  } catch (const std::exception& e) {
-    log(WARNING, "UnFollow: Failed to save following");
-  }
-
-  // clear timeline of posts
-  try {
-    std::vector<Message> messages;
-    auto filename = user_timeline_file(unfollowing_user->username);
-    {
-      ExclusiveInputFileStream old_file(filename);
-      Message message;
-      while (true) {
-        old_file >> message;
-        std::string line;
-        std::getline(old_file, line);
-        if (old_file.eof()) {
-          break;
-        }
-        if (message.username() != being_unfollowed_username) {
-          messages.push_back(message);
-        }
-      }
-    }
-
-    // garbage collect
-    if (messages.size() > 20) {
-      messages.erase(messages.begin(), messages.end() - 20);
-    }
-
-    // save to file
-    {
-      ExclusiveOutputFileStream new_file(filename);
-      for (auto& message : messages) {
-        new_file << message << std::endl;
-      }
-    }
-  } catch (const std::exception& e) {
-    log(WARNING, "UnFollow: Failed to clear timeline");
-  }
+  unfollowing_user.remove_follower(being_unfollowed_username);
 
   // replicate to slaves
   for (auto& stub : slaveStubs) {
@@ -327,27 +223,15 @@ Status SNSServiceImpl::Login(ServerContext*, const LoginRequest* request,
   const std::string& username = request->username();
   log(INFO, "Login request from " + username);
 
-  // get/create user
-  User* user = nullptr;
-  {
-    user = user_db[username];
-    if (user == nullptr) {
-      log(INFO, "New user " + username);
-      user = user_db[username] = new User(username);
-      // populate
-      auto filename = user_database_file();
-      ExclusiveOutputFileStream file(filename, std::ios::app);
-      file << username << std::endl;
-    }
-  }
-  // check if user is already logged in
-  if (user->logged_in) {
+  // check if logged in already
+  if (logged_in_users.find(username) != logged_in_users.end()) {
     log(ERROR, "Login: User already logged in");
     return Status(grpc::StatusCode::ALREADY_EXISTS, "User already logged in");
   }
 
-  // set logged in
-  user->logged_in = true;
+  // get/create user
+  user_db.create_user_if_not_exists(username);
+  logged_in_users.insert(username);
 
   // call login on slave servers
   for (auto& stub : slaveStubs) {
@@ -367,28 +251,21 @@ Status SNSServiceImpl::Logout(ServerContext*, const LogoutRequest* request,
   const std::string& username = request->username();
   log(INFO, "Logout request from " + username);
 
-  // get user
-  User* user = user_db[username];
-  if (user == nullptr) {
-    log(ERROR, "Logout: User not found");
-    return Status(grpc::StatusCode::NOT_FOUND, "User not found");
-  }
-
-  // check if user is already logged out
-  if (!user->logged_in) {
-    log(ERROR, "Logout: User already logged out");
-    return Status(grpc::StatusCode::ALREADY_EXISTS, "User already logged out");
+  // check if user is logged in
+  if (logged_in_users.find(username) == logged_in_users.end()) {
+    log(ERROR, "Logout: User not logged in");
+    return Status(grpc::StatusCode::NOT_FOUND, "User not logged in");
   }
 
   // set logged out
-  user->logged_in = false;
+  logged_in_users.erase(username);
 
-  if (user->stream) {
+  if (auto stream = timeline_streams[username]) {
     // send last message to stream
-    user->stream->WriteLast(Message(), grpc::WriteOptions());
+    stream->WriteLast(Message(), grpc::WriteOptions());
 
     // clear stream
-    user->stream = nullptr;
+    timeline_streams.erase(username);
   }
 
   // call logout on slave servers
@@ -421,44 +298,25 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
   }
 
   // save the stream so that who we are following can send us messages
-  User* user = user_db[username];
+  auto user_opt = user_db[username];
 
-  if (user == nullptr) {
+  if (user_opt == std::nullopt) {
     log(ERROR, "Timeline: Invalid user");
     return Status(grpc::StatusCode::FAILED_PRECONDITION, "Invalid user");
   }
 
-  log(INFO, "Timeline request from " + user->username);
+  auto user = user_opt.value();
 
-  user->stream = stream;
+  log(INFO, "Timeline request from " + user.get_username());
 
-  // send the user their timeline
-  {
-    std::lock_guard<std::mutex> lock(user->mtx);
-    auto filename = user_timeline_file(user->username);
-    std::ifstream file(filename);
-    if (file.is_open()) {
-      std::vector<Message> messages;
-      Message message;
-      while (true) {
-        file >> message;
-        std::string line;
-        std::getline(file, line);
-        if (file.eof()) {
-          break;
-        }
-        messages.push_back(message);
-      }
-      // truncate to most resent 20
-      if (messages.size() > 20) {
-        messages.erase(messages.begin(), messages.end() - 20);
-      }
-      // send in reverse order
-      for (auto it = messages.rbegin(); it != messages.rend(); it++) {
-        stream->Write(*it);
-      }
-      file.close();
-    }
+  // save the stream
+  timeline_streams[username] = stream;
+
+  auto timeline = user.get_timeline();
+
+  // send the timeline to the client reverse order
+  for (auto it = timeline.rbegin(); it != timeline.rend(); it++) {
+    stream->Write(*it);
   }
 
   // forward messages to followers
@@ -466,8 +324,8 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
   while (stream->Read(&message)) {
     // make sure the user is sending messages as themselves
     const std::string& username = message.username();
-    if (username != user->username) {
-      log(ERROR, "Timeline: User " + user->username +
+    if (username != user.get_username()) {
+      log(ERROR, "Timeline: User " + user.get_username() +
                      " trying to send message as " + username);
       stream->WriteLast(Message(), grpc::WriteOptions());
       return Status(grpc::StatusCode::PERMISSION_DENIED,
@@ -475,11 +333,7 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
     }
     log(INFO, "Message from " + username + " to followers");
     // save to self file
-    {
-      auto filename = user_timeline_file(user->username);
-      ExclusiveOutputFileStream file(filename, std::ios::app);
-      file << message << std::endl;
-    }
+    user.post(message);
 
     // forward to slave servers
     for (auto& stub : slaveStubs) {
@@ -491,20 +345,10 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
       }
     }
 
-    for (auto& follower : user->followers) {
-      if (user_db[follower] == nullptr) {
-        log(ERROR, "Timeline: Follower " + follower + " not found");
-        continue;
-      }
-      // save to followers files and self file
-      {
-        auto filename = user_timeline_file(follower);
-        ExclusiveOutputFileStream file(filename, std::ios::app);
-        file << message << std::endl;
-      }
-      // send to followers if they are online
-      if (user_db[follower]->stream) {
-        user_db[follower]->stream->Write(message);
+    // forward to followers if they are logged in
+    for (auto& follower : user.get_followers()) {
+      if (auto stream = timeline_streams[follower]) {
+        stream->Write(message);
       }
     }
   }
@@ -520,82 +364,16 @@ Status SNSServiceImpl::Post(ServerContext*, const Message* request, Empty*) {
   const std::string& username = request->username();
   log(INFO, "Post request from " + username);
 
-  // save to self file
-  {
-    auto filename = user_timeline_file(username);
-    ExclusiveOutputFileStream file(filename, std::ios::app);
-    file << *request << std::endl;
-  }
-
-  // save to followers files
-  User* user = user_db[username];
-  if (user == nullptr) {
+  auto user_opt = user_db[username];
+  if (user_opt == std::nullopt) {
     log(ERROR, "Post: User not found");
     return Status(grpc::StatusCode::NOT_FOUND, "User not found");
   }
 
-  for (auto& follower : user->followers) {
-    if (user_db[follower] == nullptr) {
-      log(ERROR, "Post: Follower " + follower + " not found");
-      continue;
-    }
-    auto filename = user_timeline_file(follower);
-    ExclusiveOutputFileStream file(filename, std::ios::app);
-    file << *request << std::endl;
-  }
+  auto user = user_opt.value();
+  user.post(*request);
 
   return Status::OK;
-}
-
-void SNSServiceImpl::load_user_db() {
-  try {
-    auto userfile = user_database_file();
-    ExclusiveInputFileStream file(userfile);
-    std::string username;
-    while (std::getline(file, username)) {
-      user_db[username] = new User(username);
-    }
-  } catch (const std::exception& e) {
-    log(INFO, "Could not load user database");
-    log(INFO, "Creating new user database");
-    ExclusiveOutputFileStream file(user_database_file());
-  }
-
-  // populate following
-  for (auto& [username, user] : user_db) {
-    try {
-      auto followingfile = user_following_file(username);
-      ExclusiveInputFileStream file(followingfile);
-      std::string followed_username;
-      while (std::getline(file, followed_username)) {
-        if (followed_username != "") {
-          User* followed_user = user_db[followed_username];
-          if (followed_user != nullptr) {
-            user->following.push_back(followed_username);
-            followed_user->followers.push_back(username);
-          } else {
-            log(ERROR, "Database: user " << username << " following "
-                                         << followed_username
-                                         << " who is not in database");
-          }
-        }
-      }
-    } catch (const std::exception& e) {
-      log(INFO, "Could not load following for " << username);
-    }
-  }
-}
-
-std::string SNSServiceImpl::user_database_file() {
-  return database_folder_path + "users.txt";
-}
-
-std::string SNSServiceImpl::user_following_file(const std::string& username) {
-  return database_folder_path + username + ".following";
-}
-
-std::string SNSServiceImpl::user_timeline_file(const std::string& username) {
-  return database_folder_path + username + ".timeline";
 }
 
 void Heartbeat(std::unique_ptr<CoordService::Stub> coordinator_stub,
@@ -719,44 +497,8 @@ int main(int argc, char** argv) {
   log(INFO, "Logging Initialized. Server starting...");
 
   std::string coordinator_address =
-      coordinator_ip + ":" + std::to_string(coordinator_port) + "/";
+      coordinator_ip + ":" + std::to_string(coordinator_port);
   RunServer(server_folder, coordinator_address, cluster_id, server_id, port);
 
   return 0;
-}
-
-std::ostream& operator<<(std::ostream& file, const Message& message) {
-  const time_t time = message.timestamp().seconds();
-  const struct tm* timeinfo = std::localtime(&time);
-  file << "T " << std::put_time(timeinfo, SNS_MESSAGE_TIME_FORMAT) << std::endl
-       << "U " << USERNAME_PREFIX << message.username() << std::endl
-       << "W " << message.msg();
-  return file;
-}
-
-std::istream& operator>>(std::istream& file, Message& message) {
-  std::string line;
-  std::getline(file, line);
-  if (line.empty() || line[0] != 'T') {
-    return file;
-  }
-  std::string time_str = line.substr(2);
-  struct tm timeinfo;
-  strptime(time_str.c_str(), SNS_MESSAGE_TIME_FORMAT, &timeinfo);
-  time_t time = mktime(&timeinfo);
-  Timestamp* timestamp = new Timestamp();
-  timestamp->set_seconds(time);
-  message.set_allocated_timestamp(timestamp);
-  std::getline(file, line);
-  if (line.empty() || line[0] != 'U') {
-    return file;
-  }
-  std::string username = line.substr(2 + strlen(USERNAME_PREFIX));
-  message.set_username(username);
-  std::getline(file, line);
-  if (line.empty() || line[0] != 'W') {
-    return file;
-  }
-  message.set_msg(line.substr(2) + "\n");
-  return file;
 }
