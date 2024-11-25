@@ -52,6 +52,7 @@ class SNSServiceImpl final : public SNSService::Service {
   SNSDatabase user_db;
   std::set<std::string> logged_in_users;
   std::unordered_map<std::string, TimelineStream*> timeline_streams;
+  std::unordered_map<std::string, Message> last_message;
 
   // service methods
   Status Login(ServerContext*, const LoginRequest* request,
@@ -259,6 +260,7 @@ Status SNSServiceImpl::Logout(ServerContext*, const LogoutRequest* request,
 
   // set logged out
   logged_in_users.erase(username);
+  last_message.erase(username);
 
   if (auto stream = timeline_streams[username]) {
     // send last message to stream
@@ -319,6 +321,52 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
     stream->Write(*it);
   }
 
+  // save the last sent message (end of timeline)
+  if (!timeline.empty()) {
+    last_message[username] = timeline.back();
+  }
+
+  // start a thread to periodically check for messages from other sources
+  std::thread([this, username]() {
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+      auto user = user_db[username].value();
+      auto timeline = user.get_timeline();
+      auto last = last_message[username];
+      // iterate until last message sent
+      auto it = timeline.begin();
+      while (it != timeline.end()) {
+        // check all fields
+        if (it->username() == last.username() && it->msg() == last.msg() &&
+            it->timestamp().seconds() == last.timestamp().seconds()) {
+          std::cout << "Found last message" << std::endl;
+          std::cout << *it << std::endl;
+          std::cout << last << std::endl;
+          // skip past last message
+          it++;
+          break;
+        }
+        it++;
+      }
+
+      // attempt to ge the stream
+      auto stream = timeline_streams[username];
+      if (!stream) {
+        std::cerr << "Stream not found" << std::endl;
+        return;
+      }
+      // send new messages
+      while (it != timeline.end()) {
+        stream->Write(*it);
+        it++;
+      }
+      // update last message
+      if (!timeline.empty()) {
+        last_message[username] = timeline.back();
+      }
+    }
+  }).detach();
+
   // forward messages to followers
   Message message;
   while (stream->Read(&message)) {
@@ -334,6 +382,13 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
     log(INFO, "Message from " + username + " to followers");
     // save to self file
     user.post(message);
+
+    // save to last
+    last_message[username] = message;
+    for (auto& follower : user.get_followers()) {
+      auto follower_user = user_db[follower].value();
+      follower_user.post(message);
+    }
 
     // forward to slave servers
     for (auto& stub : slaveStubs) {
