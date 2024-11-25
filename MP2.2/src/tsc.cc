@@ -1,4 +1,5 @@
 #include <grpc++/grpc++.h>
+#include <signal.h>
 
 #include <map>
 #include <string>
@@ -57,14 +58,19 @@ SNSStatus convertGRPCStatusToSNSStatus(const Status& status,
   return FAILURE_UNKNOWN;
 }
 
+std::shared_ptr<SNSService::Stub> stub_;
+std::string username;
+std::thread reader;
+
 class Client : public IClient {
  public:
   Client(const std::string& coordinator_hostname, uint32_t coordinator_port,
          uint32_t user_id)
-      : username("u" + std::to_string(user_id)),
-        user_id(user_id),
+      : user_id(user_id),
         coordinator_hostname(coordinator_hostname),
-        coordinator_port(coordinator_port) {}
+        coordinator_port(coordinator_port) {
+    username = "u" + std::to_string(user_id);
+  }
 
  protected:
   virtual SNSStatus connect() override;
@@ -72,8 +78,6 @@ class Client : public IClient {
   virtual void processTimeline() override;
 
  private:
-  // config data
-  std::string username;
   uint32_t user_id;
   std::string coordinator_hostname;
   uint32_t coordinator_port;
@@ -81,14 +85,23 @@ class Client : public IClient {
   // grpc methods
   SNSStatus Login();
   SNSReply List();
-  SNSStatus Follow(const std::string& username);
-  SNSStatus UnFollow(const std::string& username);
+  SNSStatus Follow(const std::string& username2);
+  SNSStatus UnFollow(const std::string& username2);
   SNSStatus Timeline();
   SNSStatus Ping();
-
-  // internal data
-  std::shared_ptr<SNSService::Stub> stub_;
 };
+
+void Logout() {
+  ClientContext context;
+  LogoutRequest request;
+  Empty reply;
+
+  request.set_username(username);
+
+  stub_->Logout(&context, request, &reply);
+
+  exit(0);
+}
 
 SNSStatus Client::connect() {
   auto coordinator_address =
@@ -112,7 +125,13 @@ SNSStatus Client::connect() {
 
   stub_ = SNSService::NewStub(
       grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials()));
-  return Login();
+  auto s = Login();
+
+  // setup logout handler
+  if (s == SUCCESS) {
+    signal(SIGINT, [](int) { Logout(); });
+  }
+  return s;
 }
 
 SNSReply Client::processCommand(SNSCommand cmd) {
@@ -251,19 +270,19 @@ SNSStatus Client::Timeline() {
     return FAILURE_UNKNOWN;
   }
 
-  std::thread writer([this, stream]() {
-    // while stream is open
-    while (stream->Write(MakeMessage(this->username, getPostMessage())))
-      ;
+  reader = std::thread([stream]() {
+    Message m;
+    while (stream->Read(&m)) {
+      time_t t = m.timestamp().seconds();
+      displayPostMessage(m.username(), m.msg(), t);
+    }
   });
 
-  Message m;
-  while (stream->Read(&m)) {
-    time_t t = m.timestamp().seconds();
-    displayPostMessage(m.username(), m.msg(), t);
-  }
+  // while stream is open
+  while (stream->Write(MakeMessage(username, getPostMessage())))
+    ;
   // should never get here (no way to exit timeline mode)
-  writer.join();
+  exit(1);
   return FAILURE_UNKNOWN;
 }
 

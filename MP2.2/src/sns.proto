@@ -5,6 +5,7 @@ import "google/protobuf/empty.proto";
 
 service SNSService {
   rpc Login(LoginRequest) returns (google.protobuf.Empty) {}
+  rpc Logout(LogoutRequest) returns (google.protobuf.Empty) {}
   rpc List(ListRequest) returns (ListReply) {}
   rpc Follow(FollowRequest) returns (google.protobuf.Empty) {}
   rpc UnFollow(FollowRequest) returns (google.protobuf.Empty) {}
@@ -25,6 +26,10 @@ message ListReply {
 message LoginRequest {
   int32 id = 1;
   string username = 2;
+}
+
+message LogoutRequest {
+  string username = 1;
 }
 
 message FollowRequest {

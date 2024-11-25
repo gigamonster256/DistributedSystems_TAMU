@@ -56,7 +56,7 @@ struct User {
   std::mutex mtx;
   std::vector<std::string> followers;
   std::vector<std::string> following;
-  std::unique_ptr<TimelineStream> stream;
+  TimelineStream* stream = nullptr;
   bool logged_in;
   bool operator==(const User& c1) const { return (username == c1.username); }
   User(std::string name) : username(name), logged_in(false) {}
@@ -80,6 +80,8 @@ class SNSServiceImpl final : public SNSService::Service {
   // service methods
   Status Login(ServerContext*, const LoginRequest* request,
                Empty* response) override;
+  Status Logout(ServerContext*, const LogoutRequest* request,
+                Empty* response) override;
   Status List(ServerContext*, const ListRequest* request,
               ListReply* list_reply) override;
   Status Follow(ServerContext*, const FollowRequest* request, Empty*) override;
@@ -87,6 +89,7 @@ class SNSServiceImpl final : public SNSService::Service {
                   Empty*) override;
   Status Timeline(ServerContext* context, TimelineStream* stream) override;
   Status Ping(ServerContext*, const Empty* request, Empty* response) override;
+  Status Post(ServerContext*, const Message* request, Empty* response) override;
 
  public:
   SNSServiceImpl(const std::string& server_folder)
@@ -259,30 +262,34 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
     }
   }
 
-  // save following to file
-  {
+  // save following to file (overwrite)
+  try {
     auto filename = user_following_file(unfollowing_user->username);
     ExclusiveOutputFileStream file(filename);
     for (auto& username : unfollowing_user->following) {
       file << username << std::endl;
     }
+  } catch (const std::exception& e) {
+    log(WARNING, "UnFollow: Failed to save following");
   }
 
   // clear timeline of posts
-  {
+  try {
     std::vector<Message> messages;
     auto filename = user_timeline_file(unfollowing_user->username);
-    ExclusiveInputFileStream old_file(filename);
-    Message message;
-    while (true) {
-      old_file >> message;
-      std::string line;
-      std::getline(old_file, line);
-      if (old_file.eof()) {
-        break;
-      }
-      if (message.username() != being_unfollowed_username) {
-        messages.push_back(message);
+    {
+      ExclusiveInputFileStream old_file(filename);
+      Message message;
+      while (true) {
+        old_file >> message;
+        std::string line;
+        std::getline(old_file, line);
+        if (old_file.eof()) {
+          break;
+        }
+        if (message.username() != being_unfollowed_username) {
+          messages.push_back(message);
+        }
       }
     }
 
@@ -298,6 +305,8 @@ Status SNSServiceImpl::UnFollow(ServerContext*, const FollowRequest* request,
         new_file << message << std::endl;
       }
     }
+  } catch (const std::exception& e) {
+    log(WARNING, "UnFollow: Failed to clear timeline");
   }
 
   // replicate to slaves
@@ -340,7 +349,57 @@ Status SNSServiceImpl::Login(ServerContext*, const LoginRequest* request,
   // set logged in
   user->logged_in = true;
 
-  log(INFO, "User " + username + " connected");
+  // call login on slave servers
+  for (auto& stub : slaveStubs) {
+    Empty response;
+    ClientContext context;
+    auto status = stub->Login(&context, *request, &response);
+    if (!status.ok()) {
+      log(ERROR, "Login: Slave failed to replicate");
+    }
+  }
+
+  return Status::OK;
+}
+
+Status SNSServiceImpl::Logout(ServerContext*, const LogoutRequest* request,
+                              Empty*) {
+  const std::string& username = request->username();
+  log(INFO, "Logout request from " + username);
+
+  // get user
+  User* user = user_db[username];
+  if (user == nullptr) {
+    log(ERROR, "Logout: User not found");
+    return Status(grpc::StatusCode::NOT_FOUND, "User not found");
+  }
+
+  // check if user is already logged out
+  if (!user->logged_in) {
+    log(ERROR, "Logout: User already logged out");
+    return Status(grpc::StatusCode::ALREADY_EXISTS, "User already logged out");
+  }
+
+  // set logged out
+  user->logged_in = false;
+
+  if (user->stream) {
+    // send last message to stream
+    user->stream->WriteLast(Message(), grpc::WriteOptions());
+
+    // clear stream
+    user->stream = nullptr;
+  }
+
+  // call logout on slave servers
+  for (auto& stub : slaveStubs) {
+    Empty response;
+    ClientContext context;
+    auto status = stub->Logout(&context, *request, &response);
+    if (!status.ok()) {
+      log(ERROR, "Logout: Slave failed to replicate");
+    }
+  }
 
   return Status::OK;
 }
@@ -371,7 +430,7 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
 
   log(INFO, "Timeline request from " + user->username);
 
-  user->stream = std::unique_ptr<TimelineStream>(stream);
+  user->stream = stream;
 
   // send the user their timeline
   {
@@ -417,13 +476,9 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
     log(INFO, "Message from " + username + " to followers");
     // save to self file
     {
-      std::lock_guard<std::mutex> lock(user->mtx);
       auto filename = user_timeline_file(user->username);
-      std::ofstream file(filename, std::ios::app);
-      if (file.is_open()) {
-        file << message << std::endl;
-        file.close();
-      }
+      ExclusiveOutputFileStream file(filename, std::ios::app);
+      file << message << std::endl;
     }
 
     // forward to slave servers
@@ -443,16 +498,12 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
       }
       // save to followers files and self file
       {
-        std::lock_guard<std::mutex> lock(user_db[follower]->mtx);
         auto filename = user_timeline_file(follower);
-        std::ofstream file(filename, std::ios::app);
-        if (file.is_open()) {
-          file << message << std::endl;
-          file.close();
-        }
+        ExclusiveOutputFileStream file(filename, std::ios::app);
+        file << message << std::endl;
       }
       // send to followers if they are online
-      if (user_db[follower]->stream != nullptr) {
+      if (user_db[follower]->stream) {
         user_db[follower]->stream->Write(message);
       }
     }
@@ -465,32 +516,72 @@ Status SNSServiceImpl::Ping(ServerContext*, const Empty*, Empty*) {
   return Status::OK;
 }
 
-void SNSServiceImpl::load_user_db() {
+Status SNSServiceImpl::Post(ServerContext*, const Message* request, Empty*) {
+  const std::string& username = request->username();
+  log(INFO, "Post request from " + username);
+
+  // save to self file
   {
+    auto filename = user_timeline_file(username);
+    ExclusiveOutputFileStream file(filename, std::ios::app);
+    file << *request << std::endl;
+  }
+
+  // save to followers files
+  User* user = user_db[username];
+  if (user == nullptr) {
+    log(ERROR, "Post: User not found");
+    return Status(grpc::StatusCode::NOT_FOUND, "User not found");
+  }
+
+  for (auto& follower : user->followers) {
+    if (user_db[follower] == nullptr) {
+      log(ERROR, "Post: Follower " + follower + " not found");
+      continue;
+    }
+    auto filename = user_timeline_file(follower);
+    ExclusiveOutputFileStream file(filename, std::ios::app);
+    file << *request << std::endl;
+  }
+
+  return Status::OK;
+}
+
+void SNSServiceImpl::load_user_db() {
+  try {
     auto userfile = user_database_file();
     ExclusiveInputFileStream file(userfile);
     std::string username;
     while (std::getline(file, username)) {
       user_db[username] = new User(username);
     }
+  } catch (const std::exception& e) {
+    log(INFO, "Could not load user database");
+    log(INFO, "Creating new user database");
+    ExclusiveOutputFileStream file(user_database_file());
   }
+
   // populate following
   for (auto& [username, user] : user_db) {
-    auto followingfile = user_following_file(username);
-    ExclusiveInputFileStream file(followingfile);
-    std::string followed_username;
-    while (std::getline(file, followed_username)) {
-      if (followed_username != "") {
-        User* followed_user = user_db[followed_username];
-        if (followed_user != nullptr) {
-          user->following.push_back(followed_username);
-          followed_user->followers.push_back(username);
-        } else {
-          log(ERROR, "Database: user " << username << " following "
-                                       << followed_username
-                                       << " who is not in database");
+    try {
+      auto followingfile = user_following_file(username);
+      ExclusiveInputFileStream file(followingfile);
+      std::string followed_username;
+      while (std::getline(file, followed_username)) {
+        if (followed_username != "") {
+          User* followed_user = user_db[followed_username];
+          if (followed_user != nullptr) {
+            user->following.push_back(followed_username);
+            followed_user->followers.push_back(username);
+          } else {
+            log(ERROR, "Database: user " << username << " following "
+                                         << followed_username
+                                         << " who is not in database");
+          }
         }
       }
+    } catch (const std::exception& e) {
+      log(INFO, "Could not load following for " << username);
     }
   }
 }

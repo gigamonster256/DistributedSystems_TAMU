@@ -36,6 +36,7 @@ using namespace csce662;
 using google::protobuf::Empty;
 using google::protobuf::Timestamp;
 
+using grpc::ClientContext;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
@@ -125,6 +126,7 @@ Status CoordServiceImpl::GetServer(ServerContext*, const ClientID* clientid,
   log(INFO,
       "GetServer request from client id: " + std::to_string(clientid->id()));
   if (clusters.empty()) {
+    log(ERROR, "No servers available");
     return Status(grpc::StatusCode::NOT_FOUND, "No servers available");
   }
   auto& server = get_server(clientid->id());
@@ -145,6 +147,7 @@ const ServerInfo& CoordServiceImpl::getMaster(
 
   // if cluster not found, throw exception
   if (it == clusters.end()) {
+    log(ERROR, "Cluster: " + std::to_string(cluster_id) + " not found");
     throw std::runtime_error("Cluster not found");
   }
   const auto master_id = it->second.master_id;
@@ -213,6 +216,15 @@ void CoordServiceImpl::informNewSlave(const ClusterID cluster_id,
 
   auto stub = ReplicatorService::NewStub(
       grpc::CreateChannel(master_address, grpc::InsecureChannelCredentials()));
+
+  // send the new slave info to the master
+  Empty response;
+  ClientContext context;
+  auto status = stub->InformNewSlave(&context, server_info, &response);
+
+  if (!status.ok()) {
+    log(ERROR, "InformNewSlave: Failed to inform master of new slave");
+  }
 }
 
 void RunServer(uint32_t port_no) {

@@ -2,3 +2,5 @@ coordinator
 tsc
 tsd
 synchronizer
+
+server_*_*/

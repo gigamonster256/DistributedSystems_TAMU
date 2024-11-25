@@ -39,18 +39,18 @@ class ExclusiveOutputFileStream : public std::ostream {
     // Open file in append mode initially until the lock is acquired
     file_ = fopen(filename.c_str(), "a");
     if (file_ == nullptr) {
-      throw std::runtime_error("Failed to open file");
+      throw std::runtime_error("Failed to open file: " + filename);
     }
     if (flock(fileno(file_), LOCK_EX) == -1) {
       fclose(file_);
-      throw std::runtime_error("Failed to lock file");
+      throw std::runtime_error("Failed to lock file: " + filename);
     }
 
     // If the file is opened in trunc mode, truncate the file
     if (mode & std::ios_base::trunc) {
       if (freopen(filename.c_str(), "w", file_) == nullptr) {
         fclose(file_);
-        throw std::runtime_error("Failed to truncate file");
+        throw std::runtime_error("Failed to truncate file: " + filename);
       }
     }
 
@@ -99,11 +99,11 @@ class ExclusiveInputFileStream : public std::istream {
       : std::istream(nullptr), file_(nullptr), buffer_(nullptr) {
     file_ = fopen(filename.c_str(), "r");
     if (file_ == nullptr) {
-      throw std::runtime_error("Failed to open file");
+      throw std::runtime_error("Failed to open file: " + filename);
     }
     if (flock(fileno(file_), LOCK_EX) == -1) {
       fclose(file_);
-      throw std::runtime_error("Failed to lock file");
+      throw std::runtime_error("Failed to lock file: " + filename);
     }
 
     // Initialize the custom buffer and set it as the stream buffer
