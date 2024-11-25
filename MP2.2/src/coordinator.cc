@@ -46,9 +46,10 @@ typedef int32_t ServerID;
 
 // cluster tracking information
 
+typedef std::pair<ServerInfo, time_t> ServerInfoTimePair;
 typedef struct {
   ServerID master_id;
-  std::map<ServerID, std::pair<ServerInfo, time_t>> servers;
+  std::map<ServerID, std::pair<ServerInfoTimePair, ServerInfoTimePair>> servers;
 } SNSClusterInfo;
 typedef std::map<ClusterID, SNSClusterInfo> SNSClusterMap;
 
@@ -74,10 +75,12 @@ class CoordServiceImpl final : public CoordService::Service {
   bool is_master(const ClusterID cluster_id, const ServerID server_id) const;
   ClusterStatus addToSNSCluster(ClusterID cluster_id,
                                 const ServerInfo& server_info);
-  time_t get_last_heartbeat(const ClusterID cluster_id,
-                            const ServerID server_id) const;
+  ClusterStatus addToSyncronizerCluster(const ServerInfo& server_info);
+  time_t get_last_server_heartbeat(const ClusterID cluster_id,
+                                   const ServerID server_id) const;
   void informNewSlave(const ClusterID cluster_id,
                       const ServerInfo& server_info);
+  void notifyNewMasterSyncronizer(int cluster_id);
 };
 
 Status CoordServiceImpl::Register(ServerContext*,
@@ -107,17 +110,30 @@ Status CoordServiceImpl::Register(ServerContext*,
         informNewSlave(cluster_id, server_info);
       }
     }
+    if (capability == ServerCapability::SNS_SYNCHRONIZER) {
+      // add to cluster
+      const auto status = addToSyncronizerCluster(server_info);
+      response->set_status(status);
+    }
   }
   return Status::OK;
 }
 
 Status CoordServiceImpl::Heartbeat(ServerContext*,
                                    const HeartbeatMessage* message, Empty*) {
-  const auto cluster_id = message->cluster_id();
-  const auto server_id = message->server_id();
-  log(INFO, "Heartbeat from cluster: " + std::to_string(cluster_id) +
-                " server: " + std::to_string(server_id));
-  clusters[cluster_id].servers[server_id].second = now();
+  auto cluster_id = message->cluster_id();
+  auto server_id = message->server_id();
+  // log(INFO, "Heartbeat from cluster: " + std::to_string(cluster_id) +
+  //               " server: " + std::to_string(server_id));
+  // syncronizers show as cluster 99
+  if (cluster_id == 99) {
+    // derive cluster id from server id
+    cluster_id = (server_id + 1) / 2;
+    server_id = (server_id - 1) % 2 + 1;
+    clusters[cluster_id].servers[server_id].second.second = now();
+  } else {
+    clusters[cluster_id].servers[server_id].first.second = now();
+  }
   return Status::OK;
 }
 
@@ -151,7 +167,7 @@ const ServerInfo& CoordServiceImpl::getMaster(
     throw std::runtime_error("Cluster not found");
   }
   const auto master_id = it->second.master_id;
-  return it->second.servers.at(master_id).first;
+  return it->second.servers.at(master_id).first.first;
 }
 
 bool CoordServiceImpl::is_master(const ClusterID cluster_id,
@@ -168,7 +184,7 @@ ClusterStatus CoordServiceImpl::addToSNSCluster(ClusterID cluster_id,
   const auto [hostname, port] = get_server_address(server_info);
   const auto server_id = server_info.id();
   const auto server_address = hostname + ":" + std::to_string(port);
-  log(INFO, "Register request from " + server_address);
+  // log(INFO, "Register request from " + server_address);
 
   auto it = clusters.find(cluster_id);
 
@@ -184,15 +200,65 @@ ClusterStatus CoordServiceImpl::addToSNSCluster(ClusterID cluster_id,
     cluster.master_id = server_id;
   }
 
-  cluster.servers[server_id] = {server_info, now()};
+  cluster.servers[server_id].first = {server_info, now()};
 
   const auto is_master = server_id == cluster.master_id;
+
+  if (is_master) {
+    // start thread to check for dead servers and tell the backup syncronizer to
+    // take over
+    std::thread([this, cluster_id]() {
+      while (true) {
+        sleep(5);
+        // log(INFO, "Checking for dead master server in cluster " +
+        //               std::to_string(cluster_id));
+        auto it = clusters.find(cluster_id);
+        if (it == clusters.end()) {
+          return;
+        }
+        auto& cluster = it->second;
+        auto& servers = cluster.servers;
+        auto master_id = cluster.master_id;
+        auto master_heartbeat = servers[master_id].first.second;
+        auto now = std::chrono::system_clock::to_time_t(
+            std::chrono::system_clock::now());
+        if (now - master_heartbeat > 10) {
+          log(ERROR, "Master server for cluster " + std::to_string(cluster_id) +
+                         " is dead");
+          // find the backup master
+          auto backup_id = (master_id % 2) + 1;
+          cluster.master_id = backup_id;
+          notifyNewMasterSyncronizer(cluster_id);
+        } else {
+          // log(INFO, "Master server for cluster " + std::to_string(cluster_id)
+          // +
+          //               " is alive for " +
+          //               std::to_string(now - master_heartbeat) + " seconds");
+        }
+      }
+    }).detach();
+  }
 
   return is_master ? ClusterStatus::MASTER : ClusterStatus::SLAVE;
 }
 
-time_t CoordServiceImpl::get_last_heartbeat(const ClusterID cluster_id,
-                                            const ServerID server_id) const {
+ClusterStatus CoordServiceImpl::addToSyncronizerCluster(
+    const ServerInfo& server_info) {
+  const auto [hostname, port] = get_server_address(server_info);
+  const auto sync_id = server_info.id();
+  // compute cluster id
+  const auto cluster_id = (sync_id + 1) / 2;
+  const auto server_id = (sync_id - 1) % 2 + 1;
+  const auto server_address = hostname + ":" + std::to_string(port);
+  // log(INFO, "Register request from " + server_address);
+  clusters[cluster_id].servers[server_id].second = {server_info, now()};
+
+  // 1, 3, 5 always start as master
+  return sync_id % 2 == 1 ? ClusterStatus::MASTER : ClusterStatus::SLAVE;
+}
+
+time_t CoordServiceImpl::get_last_server_heartbeat(
+    const ClusterID cluster_id, const ServerID server_id) const {
   const auto it = clusters.find(cluster_id);
   if (it == clusters.end()) {
     return 0;
@@ -202,7 +268,36 @@ time_t CoordServiceImpl::get_last_heartbeat(const ClusterID cluster_id,
   if (server_it == cluster.servers.end()) {
     return 0;
   }
-  return server_it->second.second;
+  return server_it->second.first.second;
+}
+
+void CoordServiceImpl::notifyNewMasterSyncronizer(int cluster_id) {
+  // get the backup syncronizer
+  auto it = clusters.find(cluster_id);
+  if (it == clusters.end()) {
+    log(ERROR, "Cluster: " + std::to_string(cluster_id) + " not found");
+    return;
+  }
+  auto& cluster = it->second;
+  auto& servers = cluster.servers;
+  auto& master_sync = servers[cluster.master_id].second.first;
+
+  auto [hostname, port] = get_server_address(master_sync);
+  auto master_sync_address = hostname + ":" + std::to_string(port);
+
+  std::cerr << "Master syncronizer address: " << master_sync_address
+            << std::endl;
+  auto stub = SynchronizerService::NewStub(grpc::CreateChannel(
+      master_sync_address, grpc::InsecureChannelCredentials()));
+
+  // send the SetMaster rpc
+  Empty response;
+  Empty request;
+  ClientContext context;
+  auto status = stub->SetMaster(&context, request, &response);
+  if (!status.ok()) {
+    log(ERROR, "SetMaster: Failed to inform master syncronizer of new master");
+  }
 }
 
 void CoordServiceImpl::informNewSlave(const ClusterID cluster_id,
@@ -235,6 +330,7 @@ void RunServer(uint32_t port_no) {
   builder.RegisterService(&service);
   auto server(builder.BuildAndStart());
   std::cout << "Coordinator listening on " << server_address << std::endl;
+
   server->Wait();
 }
 

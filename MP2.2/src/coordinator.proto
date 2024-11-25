@@ -12,6 +12,10 @@ service ReplicatorService {
   rpc InformNewSlave(ServerInfo) returns (google.protobuf.Empty) {}
 }
 
+service SynchronizerService {
+  rpc SetMaster(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+}
+
 // service SynchronizerService {
 
 // }

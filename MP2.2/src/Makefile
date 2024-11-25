@@ -34,7 +34,7 @@ tsd: coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o tsd.o sns_db.
 coordinator: coordinator.pb.o coordinator.grpc.pb.o coordinator.o
 	$(CXX) $^ $(LDFLAGS) -g -o $@
 
-synchronizer: coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o synchronizer.o
+synchronizer: coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o synchronizer.o sns_db.o
 	$(CXX) $^ $(LDFLAGS) -g -o $@
 
 

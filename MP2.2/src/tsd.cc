@@ -339,9 +339,6 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
         // check all fields
         if (it->username() == last.username() && it->msg() == last.msg() &&
             it->timestamp().seconds() == last.timestamp().seconds()) {
-          std::cout << "Found last message" << std::endl;
-          std::cout << *it << std::endl;
-          std::cout << last << std::endl;
           // skip past last message
           it++;
           break;
@@ -355,6 +352,7 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
         std::cerr << "Stream not found" << std::endl;
         return;
       }
+
       // send new messages
       while (it != timeline.end()) {
         stream->Write(*it);
@@ -383,11 +381,11 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
     // save to self file
     user.post(message);
 
-    // save to last
+    // save to last message
     last_message[username] = message;
     for (auto& follower : user.get_followers()) {
-      auto follower_user = user_db[follower].value();
-      follower_user.post(message);
+      auto user = user_db[follower].value();
+      last_message[follower] = message;
     }
 
     // forward to slave servers

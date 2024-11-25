@@ -154,13 +154,9 @@ std::vector<Message> SNSDatabase::get_timeline(
 
 void SNSDatabase::post_to_timeline(const std::string& username,
                                    const Message& message) {
-  auto timeline = get_timeline(username);
-  timeline.push_back(message);
   auto timelinefile = user_timeline_file(username);
-  ExclusiveOutputFileStream file(timelinefile);
-  for (const auto& message : timeline) {
-    file << message;
-  }
+  ExclusiveOutputFileStream file(timelinefile, std::ios::app);
+  file << message;
 }
 
 void SNSDatabase::post_to_self_and_followers(const std::string& username,

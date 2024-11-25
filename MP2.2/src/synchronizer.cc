@@ -31,6 +31,7 @@
 
 #include "coordinator.grpc.pb.h"
 #include "sns.grpc.pb.h"
+#include "sns_db.h"
 
 #define log(severity, msg) \
   LOG(severity) << msg;    \
@@ -52,13 +53,21 @@ using grpc::Status;
 
 #define SYNC_CLUSTER_NUM 99
 
-class SynchronizerRabbitMQ {
+bool is_master = false;
+
+class syncronizerRabbitMQ {
  private:
+  // runtime data
   amqp_connection_state_t conn;
   amqp_channel_t channel;
+  SNSDatabase db;
+
+  // configuration
   std::string hostname;
   int port;
-  int synchID;
+  int sync_id;
+  int cluster_id;
+  int server_id;
 
   void setupRabbitMQ() {
     conn = amqp_new_connection();
@@ -106,19 +115,23 @@ class SynchronizerRabbitMQ {
   }
 
  public:
-  SynchronizerRabbitMQ(const std::string &host, int p, int id)
-      : channel(1), hostname(host), port(p), synchID(id) {
+  syncronizerRabbitMQ(const std::string &server_folder, int cluster_id,
+                      int server_id, int id)
+      : channel(1),
+        db(server_folder),
+        hostname("localhost"),
+        port(5672),
+        sync_id(id),
+        cluster_id(cluster_id),
+        server_id(server_id) {
     setupRabbitMQ();
-    declareQueue("synch" + std::to_string(synchID) + "_users_queue");
-    declareQueue("synch" + std::to_string(synchID) +
-                 "_clients_relations_queue");
-    declareQueue("synch" + std::to_string(synchID) + "_timeline_queue");
-    // TODO: add or modify what kind of queues exist in your clusters based on
-    // your needs
+    declareQueue("sync" + std::to_string(id) + "_users_queue");
+    declareQueue("sync" + std::to_string(id) + "_clients_relations_queue");
+    declareQueue("sync" + std::to_string(id) + "_timeline_queue");
   }
 
   void publishUserList() {
-    std::vector<std::string> users = get_all_users_func(synchID);
+    auto users = db.get_all_usernames();
     std::sort(users.begin(), users.end());
     Json::Value userList;
     for (const auto &user : users) {
@@ -126,20 +139,20 @@ class SynchronizerRabbitMQ {
     }
     Json::FastWriter writer;
     std::string message = writer.write(userList);
-    publishMessage("synch" + std::to_string(synchID) + "_users_queue", message);
+    publishMessage("sync" + std::to_string(sync_id) + "_users_queue", message);
   }
 
   void consumeUserLists() {
     std::vector<std::string> allUsers;
     // YOUR CODE HERE
 
-    // TODO: while the number of synchronizers is harcorded as 6 right now, you
-    // need to change this to use the correct number of follower synchronizers
+    // TODO: while the number of syncronizers is harcorded as 6 right now, you
+    // need to change this to use the correct number of follower syncronizers
     // that exist overall accomplish this by making a gRPC request to the
-    // coordinator asking for the list of all follower synchronizers registered
+    // coordinator asking for the list of all follower syncronizers registered
     // with it
     for (int i = 1; i <= 6; i++) {
-      std::string queueName = "synch" + std::to_string(i) + "_users_queue";
+      std::string queueName = "sync" + std::to_string(i) + "_users_queue";
       std::string message =
           consumeMessage(queueName, 1000);  // 1 second timeout
       if (!message.empty()) {
@@ -152,16 +165,16 @@ class SynchronizerRabbitMQ {
         }
       }
     }
-    updateAllUsersFile(allUsers);
+    // updateAllUsersFile(allUsers);
   }
 
-  void publishClientRelations() {
+  void publishUserRelations() {
     Json::Value relations;
-    std::vector<std::string> users = get_all_users_func(synchID);
+    auto usernames = db.get_all_usernames();
 
-    for (const auto &client : users) {
-      int clientId = std::stoi(client);
-      std::vector<std::string> followers = getFollowersOfUser(clientId);
+    for (const auto &username : usernames) {
+      auto user = db[username].value();
+      auto followers = user.get_followers();
 
       Json::Value followerList(Json::arrayValue);
       for (const auto &follower : followers) {
@@ -169,85 +182,63 @@ class SynchronizerRabbitMQ {
       }
 
       if (!followerList.empty()) {
-        relations[client] = followerList;
+        relations[username] = followerList;
       }
     }
 
     Json::FastWriter writer;
     std::string message = writer.write(relations);
     publishMessage(
-        "synch" + std::to_string(synchID) + "_clients_relations_queue",
-        message);
+        "sync" + std::to_string(sync_id) + "_clients_relations_queue", message);
   }
 
   void consumeClientRelations() {
-    std::vector<std::string> allUsers = get_all_users_func(synchID);
+    auto usernames = db.get_all_usernames();
 
     // YOUR CODE HERE
 
-    // TODO: hardcoding 6 here, but you need to get list of all synchronizers
+    auto thingy = std::to_string(cluster_id) + std::to_string(server_id);
+
+    (void)(thingy);
+
+    // TODO: hardcoding 6 here, but you need to get list of all syncronizers
     // from coordinator as before
     for (int i = 1; i <= 6; i++) {
       std::string queueName =
-          "synch" + std::to_string(i) + "_clients_relations_queue";
+          "sync" + std::to_string(i) + "_clients_relations_queue";
       std::string message =
           consumeMessage(queueName, 1000);  // 1 second timeout
-
-      if (!message.empty()) {
-        Json::Value root;
-        Json::Reader reader;
-        if (reader.parse(message, root)) {
-          for (const auto &client : allUsers) {
-            std::string followerFile =
-                "./cluster_" + std::to_string(clusterID) + "/" +
-                clusterSubdirectory + "/" + client + "_followers.txt";
-            std::string semName = "/" + std::to_string(clusterID) + "_" +
-                                  clusterSubdirectory + "_" + client +
-                                  "_followers.txt";
-            sem_t *fileSem = sem_open(semName.c_str(), O_CREAT);
-
-            std::ofstream followerStream(
-                followerFile, std::ios::app | std::ios::out | std::ios::in);
-            if (root.isMember(client)) {
-              for (const auto &follower : root[client]) {
-                if (!file_contains_user(followerFile, follower.asString())) {
-                  followerStream << follower.asString() << std::endl;
-                }
-              }
-            }
-            sem_close(fileSem);
-          }
-        }
-      }
     }
   }
 
   // for every client in your cluster, update all their followers' timeline
   // files by publishing your user's timeline file (or just the new updates in
   // them)
-  //  periodically to the message queue of the synchronizer responsible for that
+  //  periodically to the message queue of the syncronizer responsible for that
   //  client
   void publishTimelines() {
-    std::vector<std::string> users = get_all_users_func(synchID);
+    auto usernames = db.get_all_usernames();
 
-    for (const auto &client : users) {
-      int clientId = std::stoi(client);
-      int client_cluster = ((clientId - 1) % 3) + 1;
-      // only do this for clients in your own cluster
-      if (client_cluster != clusterID) {
-        continue;
-      }
+    // for (const auto &_ : usernames) {
+    // get the client ID from the username (e.g. u1 -> 1)
+    // int client_id = std::stoi(username.substr(1));
+    // int client_cluster = ((client_id - 1) % 3) + 1;
+    // only do this for clients in your own cluster
+    // if (client_cluster != clusterID) {
+    //   continue;
+    // }
 
-      std::vector<std::string> timeline = get_tl_or_fl(synchID, clientId, true);
-      std::vector<std::string> followers = getFollowersOfUser(clientId);
+    // std::vector<std::string> timeline = get_tl_or_fl(sync_id, clientId,
+    // true); std::vector<std::string> followers =
+    // getFollowersOfUser(clientId);
 
-      // for (const auto &follower : followers) {
-      //   // send the timeline updates of your current user to all its
-      //   followers
+    // for (const auto &follower : followers) {
+    //   // send the timeline updates of your current user to all its
+    //   followers
 
-      //   // YOUR CODE HERE
-      // }
-    }
+    //   // YOUR CODE HERE
+    // }
+    // }
   }
 
   // For each client in your cluster, consume messages from your timeline queue
@@ -255,7 +246,7 @@ class SynchronizerRabbitMQ {
   // posted to their timeline
   void consumeTimelines() {
     std::string queueName =
-        "synch" + std::to_string(synchID) + "_timeline_queue";
+        "sync" + std::to_string(sync_id) + "_timeline_queue";
     std::string message = consumeMessage(queueName, 1000);  // 1 second timeout
 
     if (!message.empty()) {
@@ -265,24 +256,6 @@ class SynchronizerRabbitMQ {
 
       // YOUR CODE HERE
     }
-  }
-
- private:
-  void updateAllUsersFile(const std::vector<std::string> &users) {
-    std::string usersFile = "./cluster_" + std::to_string(clusterID) + "/" +
-                            clusterSubdirectory + "/all_users.txt";
-    std::string semName = "/" + std::to_string(clusterID) + "_" +
-                          clusterSubdirectory + "_all_users.txt";
-    sem_t *fileSem = sem_open(semName.c_str(), O_CREAT);
-
-    std::ofstream userStream(usersFile,
-                             std::ios::app | std::ios::out | std::ios::in);
-    for (std::string user : users) {
-      if (!file_contains_user(usersFile, user)) {
-        userStream << user << std::endl;
-      }
-    }
-    sem_close(fileSem);
   }
 };
 
@@ -303,22 +276,20 @@ void Heartbeat(std::unique_ptr<CoordService::Stub> coordinator_stub,
   }
 }
 
-void run_synchronizer(const std::string &coordIP, uint32_t coordPort,
-                      uint32_t port, int synchID,
-                      SynchronizerRabbitMQ &rabbitMQ) {
+void run_syncronizer(const std::string &coord_address, int port, int sync_id,
+                     syncronizerRabbitMQ &rabbitMQ) {
   // setup coordinator stub
-  std::string target_str = coordIP + ":" + std::to_string(coordPort);
   auto coord_stub_ = std::unique_ptr<CoordService::Stub>(CoordService::NewStub(
-      grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials())));
+      grpc::CreateChannel(coord_address, grpc::InsecureChannelCredentials())));
 
-  // register as a synchronizer with the coordinator
+  // register as a syncronizer with the coordinator
   ClientContext context;
   ServerRegistration registration;
   registration.set_cluster_id(SYNC_CLUSTER_NUM);
   registration.add_capabilities(ServerCapability::SNS_SYNCHRONIZER);
   ServerInfo *serverInfo = registration.mutable_info();
-  serverInfo->set_id(synchID);
-  serverInfo->set_hostname("localhost");
+  serverInfo->set_id(sync_id);
+  serverInfo->set_hostname("127.0.0.1");
   serverInfo->set_port(port);
 
   RegistrationResponse response;
@@ -327,24 +298,36 @@ void run_synchronizer(const std::string &coordIP, uint32_t coordPort,
 
   if (status.ok()) {
     log(INFO, "Registered with coordinator");
-    std::thread heartbeat_thread(Heartbeat, std::move(coord_stub_), synchID);
+    std::thread heartbeat_thread(Heartbeat, std::move(coord_stub_), sync_id);
     heartbeat_thread.detach();
   } else {
     log(ERROR, "Failed to register with coordinator");
+    exit(1);
+  }
+
+  is_master = response.status() == ClusterStatus::MASTER;
+  if (response.status() == ClusterStatus::MASTER) {
+    log(INFO, "I am the master syncronizer");
+  } else {
+    log(INFO, "I am a slave syncronizer");
   }
 
   // TODO: begin synchronization process
   while (true) {
-    // the synchronizers sync files every 5 seconds
+    // the syncronizers sync files every 5 seconds
     sleep(5);
+
+    if (!is_master) {
+      continue;
+    }
 
     grpc::ClientContext context;
     // ServerList followerServers;
     // ID id;
-    // id.set_id(synchID);
+    // id.set_id(sync_id);
 
     // making a request to the coordinator to see count of follower
-    // synchronizers
+    // syncronizers
     // coord_stub_->GetAllFollowerServers(&context, id, &followerServers);
 
     std::vector<int> server_ids;
@@ -359,7 +342,7 @@ void run_synchronizer(const std::string &coordIP, uint32_t coordPort,
     //   server_ids.push_back(serverid);
     // }
 
-    // update the count of how many follower synchronizer processes the
+    // update the count of how many follower syncronizer processes the
     // coordinator has registered
 
     // below here, you run all the update functions that synchronize the state
@@ -370,7 +353,7 @@ void run_synchronizer(const std::string &coordIP, uint32_t coordPort,
     rabbitMQ.publishUserList();
 
     // Publish client relations
-    rabbitMQ.publishClientRelations();
+    rabbitMQ.publishUserRelations();
 
     // Publish timelines
     rabbitMQ.publishTimelines();
@@ -378,28 +361,29 @@ void run_synchronizer(const std::string &coordIP, uint32_t coordPort,
   return;
 }
 
+class SyncServiceImpl final : public SynchronizerService::Service {
+  Status SetMaster(ServerContext *, const Empty *, Empty *) override {
+    is_master = true;
+    log(INFO, "I am the master syncronizer now");
+    return Status::OK;
+  }
+};
+
 void RunServer(const std::string &server_folder,
-               const std::string &coordinator_address, int synchID,
-               int port_no) {
-  std::string server_address("127.0.0.1:" + std::to_string(port_no));
-  log(INFO, "Starting synchronizer server at " + server_address);
-  // SynchServiceImpl service;
-  // grpc::EnableDefaultHealthCheckService(true);
-  // grpc::reflection::InitProtoReflectionServerBuilderPlugin();
-  // ServerBuilder builder;
-  // Listen on the given address without any authentication mechanism.
-  // builder.AddListeningPort(server_address,
-  // grpc::InsecureServerCredentials()); Register "service" as the instance
-  // through which we'll communicate with clients. In this case it corresponds
-  // to an *synchronous* service. builder.RegisterService(&service); Finally
-  // assemble the server. std::unique_ptr<Server>
-  // server(builder.BuildAndStart()); std::cout << "Server listening on " <<
-  // server_address << std::endl;
+               const std::string &coordinator_address, int cluster_id,
+               int server_id, int sync_id, int port_no) {
+  auto server_address = "127.0.0.1:" + std::to_string(port_no);
+  log(INFO, "Starting syncronizer server at " + server_address);
+  SyncServiceImpl service;
+  ServerBuilder builder;
+  builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+  auto server(builder.BuildAndStart());
 
   // Initialize RabbitMQ connection
-  SynchronizerRabbitMQ rabbitMQ("localhost", 5672, synchID);
+  syncronizerRabbitMQ rabbitMQ(server_folder, cluster_id, server_id, sync_id);
 
-  std::thread t1(run_synchronizer, port_no, synchID, std::ref(rabbitMQ));
+  std::thread t1(run_syncronizer, coordinator_address, port_no, sync_id,
+                 std::ref(rabbitMQ));
 
   // Create a consumer thread
   std::thread consumerThread([&rabbitMQ]() {
@@ -412,17 +396,19 @@ void RunServer(const std::string &server_folder,
     }
   });
 
+  log(INFO, "Server listening on " + server_address);
+
   server->Wait();
 
-  //   t1.join();
-  //   consumerThread.join();
+  t1.join();
+  consumerThread.join();
 }
 
 int main(int argc, char **argv) {
   std::string coordinator_ip = "localhost";
   uint32_t coordinator_port = 9090;
   uint32_t port = 3029;
-  uint32_t server_id = 1;
+  uint32_t sync_id = 1;
 
   int opt = 0;
   while ((opt = getopt(argc, argv, "h:k:p:i:")) != -1) {
@@ -437,24 +423,27 @@ int main(int argc, char **argv) {
         port = atoi(optarg);
         break;
       case 'i':
-        server_id = atoi(optarg);
+        sync_id = atoi(optarg);
         break;
       default:
         std::cerr << "Invalid Command Line Argument\n";
     }
   }
 
-  std::string log_name = std::string("synchronizer-") + std::to_string(port);
+  std::string log_name = std::string("syncronizer-") + std::to_string(port);
   google::InitGoogleLogging(log_name.c_str());
   log(INFO, "Logging Initialized. Server starting...");
 
   // derive cluster id from server id
-  int cluster_id = (server_id - 1) / 3 + 1;
+  int cluster_id = (sync_id + 1) / 2;
+  int server_id = (sync_id - 1) % 2 + 1;
   std::string server_folder = "server_" + std::to_string(cluster_id) + "_" +
                               std::to_string(server_id) + "/";
+  std::cerr << "Server folder: " << server_folder << std::endl;
   std::string coordinator_address =
       coordinator_ip + ":" + std::to_string(coordinator_port);
 
-  RunServer(server_folder, coordinator_address, server_id, port);
+  RunServer(server_folder, coordinator_address, cluster_id, server_id, sync_id,
+            port);
   return 0;
 }
