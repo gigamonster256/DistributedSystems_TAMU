@@ -13,7 +13,7 @@ service ReplicatorService {
 }
 
 service SynchronizerService {
-  rpc SetMaster(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+  rpc SetStatus(RegistrationResponse) returns (google.protobuf.Empty) {}
 }
 
 // service SynchronizerService {

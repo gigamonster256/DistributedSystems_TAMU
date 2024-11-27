@@ -362,9 +362,14 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
 }
 
 class SyncServiceImpl final : public SynchronizerService::Service {
-  Status SetMaster(ServerContext *, const Empty *, Empty *) override {
-    is_master = true;
-    log(INFO, "I am the master syncronizer now");
+  Status SetStatus(ServerContext *, const RegistrationResponse *status,
+                   Empty *) override {
+    is_master = status->status() == MASTER;
+    if (is_master) {
+      log(INFO, "I am the master syncronizer now");
+    } else {
+      log(INFO, "I am the slave now");
+    }
     return Status::OK;
   }
 };

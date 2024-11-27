@@ -225,9 +225,6 @@ ClusterStatus CoordServiceImpl::addToSNSCluster(ClusterID cluster_id,
         if (now - master_heartbeat > 10) {
           log(ERROR, "Master server for cluster " + std::to_string(cluster_id) +
                          " is dead");
-          // find the backup master
-          auto backup_id = (master_id % 2) + 1;
-          cluster.master_id = backup_id;
           notifyNewMasterSyncronizer(cluster_id);
         } else {
           // log(INFO, "Master server for cluster " + std::to_string(cluster_id)
@@ -280,28 +277,53 @@ void CoordServiceImpl::notifyNewMasterSyncronizer(int cluster_id) {
   }
   auto& cluster = it->second;
   auto& servers = cluster.servers;
-  auto& master_sync = servers[cluster.master_id].second.first;
+  // set the the backup master
+  auto& old_master_sync_info = servers[cluster.master_id].second.first;
+  auto backup_id = (cluster.master_id % 2) + 1;
+  cluster.master_id = backup_id;
+  auto& master_sync = servers[backup_id].second.first;
+
+  auto [old_hostname, old_port] = get_server_address(old_master_sync_info);
+  auto old_master_sync_address = old_hostname + ":" + std::to_string(old_port);
 
   auto [hostname, port] = get_server_address(master_sync);
-  auto master_sync_address = hostname + ":" + std::to_string(port);
+  auto new_master_sync_address = hostname + ":" + std::to_string(port);
 
-  std::cerr << "Master syncronizer address: " << master_sync_address
+  std::cerr << "Master syncronizer address: " << new_master_sync_address
             << std::endl;
-  auto stub = SynchronizerService::NewStub(grpc::CreateChannel(
-      master_sync_address, grpc::InsecureChannelCredentials()));
 
-  // send the SetMaster rpc
+  auto old_master_stub = SynchronizerService::NewStub(grpc::CreateChannel(
+      old_master_sync_address, grpc::InsecureChannelCredentials()));
+  auto new_master_stub = SynchronizerService::NewStub(grpc::CreateChannel(
+      new_master_sync_address, grpc::InsecureChannelCredentials()));
+
+  // send the SetStatus to slave to old master
+
   ClientContext context;
   Empty response;
-  Empty request;
+  RegistrationResponse request;
+  request.set_status(SLAVE);
 
-  auto status = stub->SetMaster(&context, request, &response);
+  auto status = old_master_stub->SetStatus(&context, request, &response);
   if (!status.ok()) {
-    log(ERROR, "SetMaster: Failed to inform master syncronizer of new master");
+    log(ERROR,
+        "SetStatus: Failed to inform old master syncronizer of new master");
     log(ERROR, status.error_message());
     log(ERROR, status.error_code());
   } else {
-    log(INFO, "Notified backup master syncronizer");
+    log(INFO, "Notified old master syncronizer");
+  }
+
+  ClientContext context2;
+  request.set_status(MASTER);
+
+  status = new_master_stub->SetStatus(&context2, request, &response);
+  if (!status.ok()) {
+    log(ERROR, "SetStatus: Failed to inform new master syncronizer");
+    log(ERROR, status.error_message());
+    log(ERROR, status.error_code());
+  } else {
+    log(INFO, "Notified new master syncronizer");
   }
 }
 
