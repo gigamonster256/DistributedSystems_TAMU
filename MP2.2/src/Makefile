@@ -47,4 +47,4 @@ synchronizer: coordinator.pb.o coordinator.grpc.pb.o sns.pb.o sns.grpc.pb.o sync
 	$(PROTOC) -I $(PROTOS_PATH) --cpp_out=. $<
 
 clean:
-	rm -f *.txt *.o *.pb.cc *.pb.h tsc tsd coordinator synchronizer
+	rm -f *.txt *.o *.pb.cc *.pb.h tsc tsd coordinator synchronizer server_*
