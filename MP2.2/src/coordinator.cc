@@ -179,8 +179,10 @@ bool CoordServiceImpl::is_master(const ClusterID cluster_id,
   return it->second.master_id == server_id;
 }
 
+std::mutex add_to_sns_mutex;
 ClusterStatus CoordServiceImpl::addToSNSCluster(ClusterID cluster_id,
                                                 const ServerInfo& server_info) {
+  std::lock_guard<std::mutex> lock(add_to_sns_mutex);
   const auto [hostname, port] = get_server_address(server_info);
   const auto server_id = server_info.id();
   const auto server_address = hostname + ":" + std::to_string(port);
@@ -239,8 +241,10 @@ ClusterStatus CoordServiceImpl::addToSNSCluster(ClusterID cluster_id,
   return is_master ? ClusterStatus::MASTER : ClusterStatus::SLAVE;
 }
 
+std::mutex sync_add_mutex;
 ClusterStatus CoordServiceImpl::addToSyncronizerCluster(
     const ServerInfo& server_info) {
+  std::lock_guard<std::mutex> lock(sync_add_mutex);
   const auto [hostname, port] = get_server_address(server_info);
   const auto sync_id = server_info.id();
   // compute cluster id
@@ -278,16 +282,20 @@ void CoordServiceImpl::notifyNewMasterSyncronizer(int cluster_id) {
   auto& cluster = it->second;
   auto& servers = cluster.servers;
   // set the the backup master
-  auto& old_master_sync_info = servers[cluster.master_id].second.first;
-  auto backup_id = (cluster.master_id % 2) + 1;
-  cluster.master_id = backup_id;
-  auto& master_sync = servers[backup_id].second.first;
+  auto old_master_sync_info = servers[cluster.master_id].second.first;
+
+  cluster.master_id = (cluster.master_id % 2) + 1;
+  auto& master_sync = servers[cluster.master_id].second.first;
 
   auto [old_hostname, old_port] = get_server_address(old_master_sync_info);
   auto old_master_sync_address = old_hostname + ":" + std::to_string(old_port);
+  std::cout << "Old Master Syncronizer Address: " << old_master_sync_address
+            << std::endl;
 
   auto [hostname, port] = get_server_address(master_sync);
   auto new_master_sync_address = hostname + ":" + std::to_string(port);
+  std::cout << "New Master Syncronizer Address: " << new_master_sync_address
+            << std::endl;
 
   std::cerr << "Master syncronizer address: " << new_master_sync_address
             << std::endl;

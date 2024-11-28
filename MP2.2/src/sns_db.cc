@@ -83,13 +83,18 @@ std::optional<SNSUser> SNSDatabase::get_user(const std::string& username) {
 
 void SNSDatabase::add_follower(const std::string& username,
                                const std::string& follower) {
+  auto following = get_following(username);
+  if (std::find(following.begin(), following.end(), follower) !=
+      following.end()) {
+    return;
+  }
   auto followingfile = user_following_file(username);
-  ExclusiveOutputFileStream following(followingfile, std::ios::app);
-  following << follower << std::endl;
+  ExclusiveOutputFileStream followingf(followingfile, std::ios::app);
+  followingf << follower << std::endl;
 
   auto followersfile = user_followers_file(follower);
-  ExclusiveOutputFileStream followers(followersfile, std::ios::app);
-  followers << username << std::endl;
+  ExclusiveOutputFileStream followersf(followersfile, std::ios::app);
+  followersf << username << std::endl;
 }
 
 std::vector<std::string> SNSDatabase::get_following(

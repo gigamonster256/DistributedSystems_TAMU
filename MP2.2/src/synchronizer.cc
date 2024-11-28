@@ -67,7 +67,7 @@ class syncronizerRabbitMQ {
   int port;
   int sync_id;
   int cluster_id;
-  int server_id;
+  // int server_id;
 
   void setupRabbitMQ() {
     conn = amqp_new_connection();
@@ -115,15 +115,16 @@ class syncronizerRabbitMQ {
   }
 
  public:
-  syncronizerRabbitMQ(const std::string &server_folder, int cluster_id,
-                      int server_id, int id)
+  syncronizerRabbitMQ(const std::string &server_folder, int cluster_id, int,
+                      int id)
       : channel(1),
         db(server_folder),
         hostname("localhost"),
         port(5672),
         sync_id(id),
-        cluster_id(cluster_id),
-        server_id(server_id) {
+        cluster_id(cluster_id)
+  // server_id(server_id)
+  {
     setupRabbitMQ();
     declareQueue("sync" + std::to_string(id) + "_users_queue");
     declareQueue("sync" + std::to_string(id) + "_clients_relations_queue");
@@ -172,45 +173,57 @@ class syncronizerRabbitMQ {
   }
 
   void publishUserRelations() {
-    Json::Value relations;
-    auto usernames = db.get_all_usernames();
+    std::map<std::string, std::vector<std::string>> followers;
 
-    for (const auto &username : usernames) {
-      auto user = db[username].value();
-      auto followers = user.get_followers();
+    for (auto &user : db.get_all_usernames()) {
+      auto user_obj = db[user].value();
+      followers[user] = user_obj.get_following();
+    }
 
-      Json::Value followerList(Json::arrayValue);
-      for (const auto &follower : followers) {
-        followerList.append(follower);
-      }
-
-      if (!followerList.empty()) {
-        relations[username] = followerList;
+    Json::Value userRelations;
+    for (const auto &[user, follower] : followers) {
+      for (const auto &follower : follower) {
+        userRelations["relations"][user].append(follower);
       }
     }
 
+    if (userRelations.empty()) {
+      return;
+    }
+
     Json::FastWriter writer;
-    std::string message = writer.write(relations);
+    std::string message = writer.write(userRelations);
+    // std::cout << "Publishing user relations: " << message << std::endl;
     publishMessage(
-        "sync" + std::to_string(sync_id) + "_clients_relations_queue", message);
+        "sync" + std::to_string(cluster_id) + "_clients_relations_queue",
+        message);
   }
 
   void consumeClientRelations() {
-    auto usernames = db.get_all_usernames();
+    std::map<std::string, std::vector<std::string>> followers;
 
-    // YOUR CODE HERE
-
-    auto thingy = std::to_string(cluster_id) + std::to_string(server_id);
-
-    (void)(thingy);
-
-    // TODO: hardcoding 6 here, but you need to get list of all syncronizers
-    // from coordinator as before
-    for (int i = 1; i <= 6; i++) {
+    // read the _clients_relations_queue from all other cluster_ids
+    for (auto id : {1, 2, 3}) {
+      if (id == cluster_id) {
+        continue;
+      }
       std::string queueName =
-          "sync" + std::to_string(i) + "_clients_relations_queue";
-      std::string message =
-          consumeMessage(queueName, 1000);  // 1 second timeout
+          "sync" + std::to_string(id) + "_clients_relations_queue";
+      std::string message = consumeMessage(queueName, 0);  // no timeout
+      if (message.empty()) {
+        continue;
+      }
+      Json::Reader reader;
+      Json::Value users;
+      reader.parse(message, users);
+
+      // std::cout << "Consuming client relations: " << users << std::endl;
+
+      for (const auto &user : users["relations"].getMemberNames()) {
+        for (const auto &follower : users["relations"][user]) {
+          db[user].value().add_follower(follower.asString());
+        }
+      }
     }
   }
 
@@ -315,10 +328,12 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
     log(INFO, "I am a slave syncronizer");
   }
 
+  sleep(5);
+
   // TODO: begin synchronization process
   while (true) {
     // the syncronizers sync files every 5 seconds
-    sleep(5);
+    sleep(1);
 
     if (!is_master) {
       continue;
@@ -356,7 +371,7 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
     rabbitMQ.publishUserList();
 
     // Publish client relations
-    // rabbitMQ.publishUserRelations();
+    rabbitMQ.publishUserRelations();
 
     // // Publish timelines
     // rabbitMQ.publishTimelines();
@@ -398,10 +413,9 @@ void RunServer(const std::string &server_folder,
   std::thread consumerThread([&rabbitMQ]() {
     while (true) {
       rabbitMQ.consumeUserLists();
-      // rabbitMQ.consumeClientRelations();
+      rabbitMQ.consumeClientRelations();
       // rabbitMQ.consumeTimelines();
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-      // you can modify this sleep period as per your choice
+      std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     }
   });
 

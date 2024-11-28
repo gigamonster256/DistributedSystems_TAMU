@@ -106,7 +106,7 @@ Status SNSServiceImpl::List(ServerContext*, const ListRequest* request,
   for (auto& user : all_users) {
     list_reply->add_all_users(user);
   }
-  auto following = user.get_following();
+  auto following = user.get_followers();
   for (auto& username : following) {
     list_reply->add_followers(username);
   }
