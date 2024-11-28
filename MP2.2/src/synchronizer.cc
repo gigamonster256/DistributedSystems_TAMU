@@ -132,40 +132,43 @@ class syncronizerRabbitMQ {
 
   void publishUserList() {
     auto users = db.get_all_usernames();
-    std::sort(users.begin(), users.end());
+    if (users.empty()) {
+      return;
+    }
     Json::Value userList;
     for (const auto &user : users) {
       userList["users"].append(user);
     }
     Json::FastWriter writer;
     std::string message = writer.write(userList);
-    publishMessage("sync" + std::to_string(sync_id) + "_users_queue", message);
+    publishMessage("sync" + std::to_string(cluster_id) + "_users_queue",
+                   message);
   }
 
   void consumeUserLists() {
-    std::vector<std::string> allUsers;
-    // YOUR CODE HERE
+    std::set<std::string> allUsers;
 
-    // TODO: while the number of syncronizers is harcorded as 6 right now, you
-    // need to change this to use the correct number of follower syncronizers
-    // that exist overall accomplish this by making a gRPC request to the
-    // coordinator asking for the list of all follower syncronizers registered
-    // with it
-    for (int i = 1; i <= 6; i++) {
-      std::string queueName = "sync" + std::to_string(i) + "_users_queue";
-      std::string message =
-          consumeMessage(queueName, 1000);  // 1 second timeout
-      if (!message.empty()) {
-        Json::Value root;
-        Json::Reader reader;
-        if (reader.parse(message, root)) {
-          for (const auto &user : root["users"]) {
-            allUsers.push_back(user.asString());
-          }
-        }
+    // read the _users_queue from all other cluster_ids
+    for (auto id : {1, 2, 3}) {
+      if (id == cluster_id) {
+        continue;
+      }
+      std::string queueName = "sync" + std::to_string(id) + "_users_queue";
+      std::string message = consumeMessage(queueName, 0);  // no timeout
+      if (message.empty()) {
+        continue;
+      }
+      Json::Reader reader;
+      Json::Value users;
+      reader.parse(message, users);
+      for (const auto &user : users["users"]) {
+        allUsers.insert(user.asString());
       }
     }
-    // updateAllUsersFile(allUsers);
+    // endure all users exist in the DB
+    for (const auto &user : allUsers) {
+      db.create_user_if_not_exists(user);
+    }
   }
 
   void publishUserRelations() {
@@ -321,7 +324,7 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
       continue;
     }
 
-    grpc::ClientContext context;
+    // grpc::ClientContext context;
     // ServerList followerServers;
     // ID id;
     // id.set_id(sync_id);
@@ -330,8 +333,8 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
     // syncronizers
     // coord_stub_->GetAllFollowerServers(&context, id, &followerServers);
 
-    std::vector<int> server_ids;
-    std::vector<std::string> hosts, ports;
+    // std::vector<int> server_ids;
+    // std::vector<std::string> hosts, ports;
     // for (std::string host : followerServers.hostname()) {
     //   hosts.push_back(host);
     // }
@@ -353,10 +356,10 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
     rabbitMQ.publishUserList();
 
     // Publish client relations
-    rabbitMQ.publishUserRelations();
+    // rabbitMQ.publishUserRelations();
 
-    // Publish timelines
-    rabbitMQ.publishTimelines();
+    // // Publish timelines
+    // rabbitMQ.publishTimelines();
   }
   return;
 }
@@ -395,8 +398,8 @@ void RunServer(const std::string &server_folder,
   std::thread consumerThread([&rabbitMQ]() {
     while (true) {
       rabbitMQ.consumeUserLists();
-      rabbitMQ.consumeClientRelations();
-      rabbitMQ.consumeTimelines();
+      // rabbitMQ.consumeClientRelations();
+      // rabbitMQ.consumeTimelines();
       std::this_thread::sleep_for(std::chrono::seconds(5));
       // you can modify this sleep period as per your choice
     }

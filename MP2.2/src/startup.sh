@@ -2,6 +2,8 @@
 
 make
 
+./stop.sh
+
 # Start the coordinator
 ./coordinator -p 9000 &
 
