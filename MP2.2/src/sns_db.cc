@@ -28,6 +28,10 @@ void SNSUser::post(const Message& message) {
   db_->post_to_self_and_followers(username_, message);
 }
 
+void SNSUser::add_message(const Message& message) {
+  db_->post_to_timeline(username_, message);
+}
+
 std::string SNSDatabase::user_database_file() const {
   return folder_path_ + "users.txt";
 }

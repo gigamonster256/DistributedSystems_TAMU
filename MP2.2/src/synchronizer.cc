@@ -54,6 +54,7 @@ using grpc::Status;
 #define SYNC_CLUSTER_NUM 99
 
 bool is_master = false;
+std::mutex rabbitMutex;
 
 class syncronizerRabbitMQ {
  private:
@@ -90,13 +91,26 @@ class syncronizerRabbitMQ {
                        amqp_cstring_bytes(message.c_str()));
   }
 
+  void publishToAllExceptSelfCluster(const std::string &message,
+                                     const std::string &queuePostfix) {
+    for (auto i : {1, 2, 3, 4, 5, 6}) {
+      if (i == sync_id) {
+        continue;
+      }
+      auto cluster_id = (i + 1) / 2;
+      if (cluster_id == this->cluster_id) {
+        continue;
+      }
+      publishMessage("sync" + std::to_string(i) + queuePostfix, message);
+    }
+  }
+
   std::string consumeMessage(const std::string &queueName,
                              int timeout_ms = 5000) {
     amqp_basic_consume(conn, channel, amqp_cstring_bytes(queueName.c_str()),
                        amqp_empty_bytes, 0, 1, 0, amqp_empty_table);
 
     amqp_envelope_t envelope;
-    amqp_maybe_release_buffers(conn);
 
     struct timeval timeout;
     timeout.tv_sec = timeout_ms / 1000;
@@ -142,33 +156,28 @@ class syncronizerRabbitMQ {
     }
     Json::FastWriter writer;
     std::string message = writer.write(userList);
-    publishMessage("sync" + std::to_string(cluster_id) + "_users_queue",
-                   message);
+    // publish to all other syncronizers queues except self and same cluster
+    publishToAllExceptSelfCluster(message, "_users_queue");
   }
 
   void consumeUserLists() {
     std::set<std::string> allUsers;
 
-    // read the _users_queue from all other cluster_ids
-    for (auto id : {1, 2, 3}) {
-      if (id == cluster_id) {
-        continue;
-      }
-      std::string queueName = "sync" + std::to_string(id) + "_users_queue";
-      std::string message = consumeMessage(queueName, 0);  // no timeout
-      if (message.empty()) {
-        continue;
-      }
-      Json::Reader reader;
-      Json::Value users;
-      reader.parse(message, users);
-      for (const auto &user : users["users"]) {
-        allUsers.insert(user.asString());
-      }
+    std::string queueName = "sync" + std::to_string(sync_id) + "_users_queue";
+    std::string message = consumeMessage(queueName, 0);  // no timeout
+    if (message.empty()) {
+      return;
     }
-    // endure all users exist in the DB
-    for (const auto &user : allUsers) {
-      db.create_user_if_not_exists(user);
+    Json::Reader reader;
+    Json::Value users;
+    reader.parse(message, users);
+    processJson(users);
+  }
+
+  void processUserList(const Json::Value &users) {
+    // std::cout << "Processing user list" << users << std::endl;
+    for (const auto &user : users["users"]) {
+      db.create_user_if_not_exists(user.asString());
     }
   }
 
@@ -194,35 +203,32 @@ class syncronizerRabbitMQ {
     Json::FastWriter writer;
     std::string message = writer.write(userRelations);
     // std::cout << "Publishing user relations: " << message << std::endl;
-    publishMessage(
-        "sync" + std::to_string(cluster_id) + "_clients_relations_queue",
-        message);
+    publishToAllExceptSelfCluster(message, "_clients_relations_queue");
   }
 
   void consumeClientRelations() {
     std::map<std::string, std::vector<std::string>> followers;
 
     // read the _clients_relations_queue from all other cluster_ids
-    for (auto id : {1, 2, 3}) {
-      if (id == cluster_id) {
-        continue;
-      }
-      std::string queueName =
-          "sync" + std::to_string(id) + "_clients_relations_queue";
-      std::string message = consumeMessage(queueName, 0);  // no timeout
-      if (message.empty()) {
-        continue;
-      }
-      Json::Reader reader;
-      Json::Value users;
-      reader.parse(message, users);
 
-      // std::cout << "Consuming client relations: " << users << std::endl;
+    std::string queueName =
+        "sync" + std::to_string(sync_id) + "_clients_relations_queue";
+    std::string message = consumeMessage(queueName, 0);  // no timeout
+    if (message.empty()) {
+      return;
+    }
+    Json::Reader reader;
+    Json::Value users;
+    reader.parse(message, users);
 
-      for (const auto &user : users["relations"].getMemberNames()) {
-        for (const auto &follower : users["relations"][user]) {
-          db[user].value().add_follower(follower.asString());
-        }
+    processJson(users);
+  }
+
+  void processUserRelations(const Json::Value &users) {
+    // std::cout << "Processing user relations" << users << std::endl;
+    for (const auto &user : users["relations"].getMemberNames()) {
+      for (const auto &follower : users["relations"][user]) {
+        db[user].value().add_follower(follower.asString());
       }
     }
   }
@@ -235,42 +241,113 @@ class syncronizerRabbitMQ {
   void publishTimelines() {
     auto usernames = db.get_all_usernames();
 
-    // for (const auto &_ : usernames) {
-    // get the client ID from the username (e.g. u1 -> 1)
-    // int client_id = std::stoi(username.substr(1));
-    // int client_cluster = ((client_id - 1) % 3) + 1;
-    // only do this for clients in your own cluster
-    // if (client_cluster != clusterID) {
-    //   continue;
-    // }
+    for (const auto &username : usernames) {
+      auto user = db[username].value();
+      auto timeline = user.get_timeline();
+      if (timeline.empty()) {
+        continue;
+      }
 
-    // std::vector<std::string> timeline = get_tl_or_fl(sync_id, clientId,
-    // true); std::vector<std::string> followers =
-    // getFollowersOfUser(clientId);
+      Json::Value timelineJson;
+      for (const auto &message : timeline) {
+        Json::Value messageJson;
+        messageJson["username"] = message.username();
+        messageJson["message"] = message.msg();
+        messageJson["timestamp"] = message.timestamp().seconds();
+        timelineJson["timeline"][username].append(messageJson);
+      }
 
-    // for (const auto &follower : followers) {
-    //   // send the timeline updates of your current user to all its
-    //   followers
-
-    //   // YOUR CODE HERE
-    // }
-    // }
+      Json::FastWriter writer;
+      std::string message = writer.write(timelineJson);
+      // std::cout << "Publishing timeline: " << message << std::endl;
+      publishToAllExceptSelfCluster(message, "_timeline_queue");
+    }
   }
 
   // For each client in your cluster, consume messages from your timeline queue
   // and modify your client's timeline files based on what the users they follow
   // posted to their timeline
+  std::map<std::string, Message> lastMessage;
   void consumeTimelines() {
-    std::string queueName =
-        "sync" + std::to_string(sync_id) + "_timeline_queue";
-    std::string message = consumeMessage(queueName, 1000);  // 1 second timeout
+    // get a message from the timeline queues
+    // std::cout << "Checking timeline queue: " << cluster_id << std::endl;
+    std::string message =
+        consumeMessage("sync" + std::to_string(sync_id) + "_timeline_queue", 0);
+    if (message.empty()) {
+      return;
+    }
 
-    if (!message.empty()) {
-      // consume the message from the queue and update the timeline file of the
-      // appropriate client with the new updates to the timeline of the user it
-      // follows
+    Json::Reader reader;
+    Json::Value timelines;
+    reader.parse(message, timelines);
 
-      // YOUR CODE HERE
+    processJson(timelines);
+  }
+
+  void processTimeline(const Json::Value &timelines) {
+    // std::cout << "Processing timeline" << timelines << std::endl;
+    for (const auto &user : timelines["timeline"].getMemberNames()) {
+      // std::cout << "Consuming timeline: " << user << std::endl;
+      std::vector<Message> timeline;
+      for (const auto &message : timelines["timeline"][user]) {
+        std::string username = message["username"].asString();
+        std::string msg = message["message"].asString();
+        int timestamp = message["timestamp"].asInt();
+
+        Message msgObj;
+        msgObj.set_username(username);
+        msgObj.set_msg(msg);
+        msgObj.mutable_timestamp()->set_seconds(timestamp);
+        timeline.push_back(msgObj);
+      }
+
+      // print the timeline
+      // for (const auto &msg : timeline) {
+      //   std::cout << msg.username() << " " << msg.msg() << " "
+      //             << msg.timestamp().seconds() << std::endl;
+      // }
+
+      // get the timeline saved to the database
+      auto user_obj = db[user].value();
+      auto dbTimeline = user_obj.get_timeline();
+
+      // remove all the messages that are already in the database
+      for (const auto &old_message : dbTimeline) {
+        timeline.erase(
+            std::remove_if(timeline.begin(), timeline.end(),
+                           [&old_message](const Message &msg) {
+                             return msg.msg() == old_message.msg() &&
+                                    msg.username() == old_message.username() &&
+                                    msg.timestamp().seconds() ==
+                                        old_message.timestamp().seconds();
+                           }),
+            timeline.end());
+      }
+
+      // print new messages
+      // for (const auto &msg : timeline) {
+      //   std::cout << "New message: " << msg.username() << " " << msg.msg()
+      //             << " " << msg.timestamp().seconds() << std::endl;
+      // }
+
+      // add the new messages to the database
+      for (const auto &msg : timeline) {
+        user_obj.add_message(msg);
+      }
+    }
+  }
+
+  // there seems to be a race condition when getting messages from named queues
+  // because of this, we have to get a message, parse it, then see where it
+  // should actually go
+  void processJson(const Json::Value &json) {
+    // check if it as a users, relations, or timeline key
+    if (json.isMember("users")) {
+      processUserList(json);
+    } else if (json.isMember("relations")) {
+      processUserRelations(json);
+    } else if (json.isMember("timeline")) {
+      processTimeline(json);
     }
   }
 };
@@ -328,12 +405,10 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
     log(INFO, "I am a slave syncronizer");
   }
 
-  sleep(5);
-
   // TODO: begin synchronization process
   while (true) {
     // the syncronizers sync files every 5 seconds
-    sleep(1);
+    sleep(5);
 
     if (!is_master) {
       continue;
@@ -374,7 +449,7 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
     rabbitMQ.publishUserRelations();
 
     // // Publish timelines
-    // rabbitMQ.publishTimelines();
+    rabbitMQ.publishTimelines();
   }
   return;
 }
@@ -412,10 +487,15 @@ void RunServer(const std::string &server_folder,
   // Create a consumer thread
   std::thread consumerThread([&rabbitMQ]() {
     while (true) {
+      // queues dont seem to be working... everything is in one queue
+      // no matter what the queue name is
+      // auto message = rabbit
+      // lock rabbitMQ
+      std::lock_guard<std::mutex> lock(rabbitMutex);
       rabbitMQ.consumeUserLists();
       rabbitMQ.consumeClientRelations();
-      // rabbitMQ.consumeTimelines();
-      std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+      rabbitMQ.consumeTimelines();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   });
 

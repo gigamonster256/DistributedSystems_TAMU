@@ -163,6 +163,7 @@ class SNSUser {
   // post a message to the user's timeline
   // and the timeline of the user's followers
   void post(const Message& message);
+  void add_message(const Message& message);
 };
 
 class SNSDatabase {

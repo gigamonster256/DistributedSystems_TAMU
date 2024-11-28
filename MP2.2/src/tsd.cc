@@ -329,7 +329,7 @@ Status SNSServiceImpl::Timeline(ServerContext* context,
   // start a thread to periodically check for messages from other sources
   std::thread([this, username]() {
     while (true) {
-      std::this_thread::sleep_for(std::chrono::seconds(10));
+      std::this_thread::sleep_for(std::chrono::seconds(1));
       auto user = user_db[username].value();
       auto timeline = user.get_timeline();
       auto last = last_message[username];
