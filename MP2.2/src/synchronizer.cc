@@ -86,6 +86,7 @@ class syncronizerRabbitMQ {
 
   void publishMessage(const std::string &queueName,
                       const std::string &message) {
+    std::lock_guard<std::mutex> lock(rabbitMutex);
     amqp_basic_publish(conn, channel, amqp_empty_bytes,
                        amqp_cstring_bytes(queueName.c_str()), 0, 0, NULL,
                        amqp_cstring_bytes(message.c_str()));
@@ -107,6 +108,7 @@ class syncronizerRabbitMQ {
 
   std::string consumeMessage(const std::string &queueName,
                              int timeout_ms = 5000) {
+    std::lock_guard<std::mutex> lock(rabbitMutex);
     amqp_basic_consume(conn, channel, amqp_cstring_bytes(queueName.c_str()),
                        amqp_empty_bytes, 0, 1, 0, amqp_empty_table);
 
@@ -365,7 +367,7 @@ void Heartbeat(std::unique_ptr<CoordService::Stub> coordinator_stub,
       log(ERROR, "Heartbeat failed");
       break;
     }
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 }
 
@@ -408,7 +410,7 @@ void run_syncronizer(const std::string &coord_address, int port, int sync_id,
   // TODO: begin synchronization process
   while (true) {
     // the syncronizers sync files every 5 seconds
-    sleep(5);
+    sleep(1);
 
     if (!is_master) {
       continue;
@@ -490,11 +492,10 @@ void RunServer(const std::string &server_folder,
       // queues dont seem to be working... everything is in one queue
       // no matter what the queue name is
       // auto message = rabbit
-      // lock rabbitMQ
-      std::lock_guard<std::mutex> lock(rabbitMutex);
       rabbitMQ.consumeUserLists();
       rabbitMQ.consumeClientRelations();
       rabbitMQ.consumeTimelines();
+
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   });
